@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv*/
+venv/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+.env
+.envrc
+*.whl
+*.tar.gz
+
+# Claude Code worktree runtime artifacts
+.claude/worktrees/
+
+# local venvs used for install testing
+.venv/
+venv/

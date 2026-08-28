@@ -1,0 +1,134 @@
+# pyproject.toml
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whatsapp-desktop-mcp"
+version = "0.0.1rc1"
+description = "MCP stdio server for the macOS WhatsApp Desktop app — read history and send messages from Claude Desktop / Claude Code."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "WhatsApp MCP contributors" },
+]
+keywords = ["mcp", "model-context-protocol", "whatsapp", "macos", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    "mcp[cli]==1.27.1",
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+# pyobjc powers the AX-API state assertion in sender/ax_assert.py — the
+# load-bearing mitigation against wrong-chat fuzzy sends. It is an EXTRA, not a
+# base dependency, for a concrete reason:
+#
+#   pyobjc-framework-Quartz (a transitive dep of -ApplicationServices) does not
+#   COMPILE FROM SOURCE on macOS 15+. Modules/_coregraphics.m calls
+#   CGWindowListCreateImageFromArray, obsoleted in macOS 15.0, and pyobjc builds
+#   with -Werror. Verified still present in 12.2.2, the latest release — bumping
+#   the pin does not help. The prebuilt wheels are fine (upstream builds them on
+#   an older SDK); only source builds break.
+#
+# Keeping pyobjc out of `dependencies` means the default install resolves to
+# pure-Python wheels and compiles nothing, so it works on every macOS version.
+# The server degrades gracefully without it: ax_assert.py already guards both
+# imports in try/except ImportError and sets _PYOBJC_AVAILABLE = False, so the
+# read tools keep working and only the AX preflight raises
+# AccessibilityAPIUnavailable. Since --read-only is the DEFAULT, the base
+# install is fully functional as-is.
+#
+# Install `.[send]` only alongside --no-read-only, and only via a wheel-capable
+# installer (pip/uv defaults). Never with --no-binary.
+send = [
+    "pyobjc-core>=12.1",
+    "pyobjc-framework-Cocoa>=12.1",
+    "pyobjc-framework-ApplicationServices>=12.1",
+]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-subprocess>=1.5",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+whatsapp-desktop-mcp = "whatsapp_desktop_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ankit-agarwa1/whatsapp-desktop-mcp"
+Issues = "https://github.com/ankit-agarwa1/whatsapp-desktop-mcp/issues"
+Upstream = "https://github.com/jqueguiner/whatsapp-desktop-mcp"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whatsapp_desktop_mcp"]
+
+# ---------- Lint ----------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "UP",    # pyupgrade (use modern syntax for our 3.12 floor)
+    "TID",   # flake8-tidy-imports
+    "T201",  # NO print() — Pitfall P7 / SETUP-03
+]
+# T201 is in `select`; we leave it un-ignored so violations are errors.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use print for debugging when failing.
+"tests/**/*.py" = ["T201"]
+# Phase 3 Plan 03-03 (D-27): the dev subpackage hosts one-shot CLI
+# utilities (e.g. `whatsapp-desktop-mcp dev reset-rate-limit`) that
+# legitimately print to stdout. Phase 0 D-05's stdout-purity rule
+# applies to the stdio MCP server (whatsapp-desktop-mcp without
+# subcommand), NOT to `whatsapp-desktop-mcp dev *`. The exemption is
+# scoped to dev/*.py only — server.py / tools/* / reader/* / sender/*
+# all keep T201 active.
+"src/whatsapp_desktop_mcp/dev/*.py" = ["T201"]
+
+[tool.ruff.format]
+# Defaults are fine; explicit for clarity.
+quote-style = "double"
+indent-style = "space"
+
+# ---------- Types ----------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# pytest-subprocess fixtures are loosely typed.
+module = "pytest_subprocess.*"
+ignore_missing_imports = true
+
+# ---------- Tests ----------
+[tool.pytest.ini_options]
+minversion = "8.2"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+markers = [
+    "live: requires a live macOS environment with WhatsApp installed (RUN_LIVE=1)",
+]

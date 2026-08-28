@@ -1,0 +1,64 @@
+# CI: runs on push to main + every PR.
+# Lints, format-checks, type-checks, and runs the non-live test suite.
+#
+# Two install matrices, deliberately:
+#   - base: no pyobjc at all. Proves the default install has zero native deps
+#     and that ax_assert.py degrades gracefully (_PYOBJC_AVAILABLE = False).
+#   - send: installs the [send] extra. Proves pyobjc resolves to WHEELS. Never
+#     pass --no-binary here; pyobjc-framework-Quartz cannot compile on macOS 15+
+#     (CGWindowListCreateImageFromArray, obsoleted in 15.0, built with -Werror).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-type-test:
+    runs-on: macos-15   # Apple Silicon, and >= the macOS version where the upstream build broke
+    strategy:
+      fail-fast: false
+      matrix:
+        extras: ["dev", "dev,send"]
+    name: "test (${{ matrix.extras }})"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[${{ matrix.extras }}]"
+
+      - name: Assert pyobjc presence matches the extra
+        run: |
+          python - <<'PY'
+          import os
+          from whatsapp_desktop_mcp.sender import ax_assert
+          want = "send" in os.environ["EXTRAS"]
+          got = ax_assert._PYOBJC_AVAILABLE
+          assert got is want, f"_PYOBJC_AVAILABLE={got}, expected {want}"
+          print(f"_PYOBJC_AVAILABLE = {got} (correct for extras={os.environ['EXTRAS']})")
+          PY
+        env:
+          EXTRAS: ${{ matrix.extras }}
+
+      - name: Lint (ruff check)
+        run: ruff check src tests
+
+      - name: Format check (ruff format --check)
+        run: ruff format --check src tests
+
+      - name: Type check (mypy strict)
+        run: mypy
+
+      - name: Test (excluding live tests)
+        run: pytest -m "not live"
