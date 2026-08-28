@@ -169,6 +169,164 @@ def test_walk_caps_at_200_nodes(mock_pyobjc: object, monkeypatch: pytest.MonkeyP
     assert fake.role_calls <= ax_assert._MAX_WALK_NODES + 1
 
 
+# ---------------------------------------------------------------------------
+# WhatsApp 26.31.23 chat-header shape (verified live, pid 948)
+# ---------------------------------------------------------------------------
+
+
+def _wa_26_31_23_window(
+    focused: str,
+    *,
+    call_target: str | None = None,
+    backlog: int = 3,
+) -> list[dict[str, object]]:
+    """The 26.31.23 focused-window AX shape, verified live (pid 948, 81 nodes).
+
+    Sidebar branch: the window's ONLY ``AXHeading`` is the sidebar title
+    "Chats" — NOT the focused chat — and the chat rows are ``AXButton``
+    nodes carrying other chats' names with no ``AXIdentifier`` at all.
+
+    Conversation branch: the header is an ``AXButton`` carrying
+    ``AXIdentifier == "NavigationBar_HeaderViewButton"``; the call buttons
+    beside it carry no identifier; the message bubbles are ``AXStaticText``
+    under ``AXIdentifier == "WAMessageBubbleTableViewCell"``. The header
+    sits behind the message list in depth-first order, which is what made
+    the 200-node budget bury it.
+    """
+    call_target = focused if call_target is None else call_target
+    return [
+        {
+            "role": "AXGroup",
+            "children": [
+                {
+                    "role": "AXGroup",
+                    "identifier": "Toolbar",
+                    "children": [
+                        {"role": "AXHeading", "label": "‎Chats"},
+                        {
+                            "role": "AXButton",
+                            "identifier": "NavigationBar_NewChatButton",
+                            "label": "‎New Chat",
+                        },
+                    ],
+                },
+                {
+                    "role": "AXGroup",
+                    "identifier": "ChatListView_TableView",
+                    "children": [
+                        {"role": "AXButton", "label": "CRED"},
+                        {"role": "AXButton", "label": "Nitin Stable Money"},
+                        {"role": "AXButton", "label": "Engineering - StableMoney"},
+                    ],
+                },
+            ],
+        },
+        {
+            "role": "AXGroup",
+            "children": [
+                {
+                    "role": "AXGroup",
+                    "identifier": "Toolbar",
+                    "children": [
+                        {
+                            "role": "AXButton",
+                            "identifier": "NavigationBar_HeaderViewButton",
+                            "label": focused,
+                        },
+                        {
+                            "role": "AXButton",
+                            "label": f"‎Start video call with {call_target}",
+                        },
+                    ],
+                },
+                {
+                    "role": "AXGroup",
+                    "identifier": "ChatMessagesTableView",
+                    "children": [
+                        {
+                            "role": "AXStaticText",
+                            "identifier": "WAMessageBubbleTableViewCell",
+                            "label": f"‎Your message, m{i}, ‎Sent to {focused}",
+                        }
+                        for i in range(backlog)
+                    ],
+                },
+            ],
+        },
+    ]
+
+
+def test_chat_header_axbutton_identifier_matches_on_26_31_23(
+    mock_pyobjc: object,
+) -> None:
+    """VERIFIED-LIVE regression (26.31.23): the header is an AXButton, not an AXHeading.
+
+    Fails before the fix: the AXHeading-only walk collects the sidebar
+    title "Chats" and nothing else, so the preflight can never match the
+    focused chat on this build and every send aborts.
+    """
+    from tests.unit.conftest import _AXFake
+
+    fake: _AXFake = mock_pyobjc  # type: ignore[assignment]
+    fake.walk_tree = _wa_26_31_23_window("Nitin Stable Money")
+
+    # Should NOT raise — the NavigationBar_HeaderViewButton node carries
+    # the focused chat's display name.
+    ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+
+def test_chat_header_identifier_label_lrm_is_normalised(mock_pyobjc: object) -> None:
+    """U+200E on the identifier-selected header label is stripped before comparing."""
+    from tests.unit.conftest import _AXFake
+
+    fake: _AXFake = mock_pyobjc  # type: ignore[assignment]
+    # Leading LRM on the header label — the form most 26.31.23 AX labels carry.
+    fake.walk_tree = _wa_26_31_23_window("‎⁨Nitin Stable Money⁩")
+
+    ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+
+def test_wrong_chat_aborts_despite_sidebar_row_and_call_button(
+    mock_pyobjc: object,
+) -> None:
+    """D-03: chat B focused, send aimed at chat A → abort, even though A is on screen.
+
+    "Nitin Stable Money" is visible as a sidebar row AND named by the
+    conversation's call button, but neither is the focused chat. Only the
+    NavigationBar_HeaderViewButton node may satisfy the assertion.
+    """
+    from tests.unit.conftest import _AXFake
+
+    fake: _AXFake = mock_pyobjc  # type: ignore[assignment]
+    fake.walk_tree = _wa_26_31_23_window("Mom", call_target="Nitin Stable Money")
+
+    with pytest.raises(ChatHeaderMismatch) as exc_info:
+        ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+    # The diagnostic must show the header only — not the sidebar rows, not
+    # the sidebar title, not the call button.
+    assert "['Mom']" in str(exc_info.value)
+
+
+def test_long_message_backlog_does_not_bury_the_chat_header(
+    mock_pyobjc: object,
+) -> None:
+    """The 200-node budget must not be spent on the message list before the header.
+
+    Fails with the old LIFO walk even once the header node is selectable:
+    depth-first descends into the 250-bubble message subtree first and
+    exhausts ``_MAX_WALK_NODES`` before reaching the shallow toolbar, which
+    is what produced the empty ``observed ... = []`` diagnostic in the
+    field report.
+    """
+    from tests.unit.conftest import _AXFake
+
+    fake: _AXFake = mock_pyobjc  # type: ignore[assignment]
+    fake.walk_tree = _wa_26_31_23_window("Nitin Stable Money", backlog=250)
+
+    ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+
 def test_assert_first_search_result_matches_uses_widened_role_set(
     mock_pyobjc: object,
 ) -> None:
