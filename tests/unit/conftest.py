@@ -404,10 +404,13 @@ def _seed_chatstorage(conn: sqlite3.Connection, *, group_id: int = 2) -> None:
     )
     pk += 1
 
-    # 1 media message — joins ZWAMEDIAITEM.
+    # 1 media message — joins ZWAMEDIAITEM. Shaped like the live DB:
+    # ZTEXT is NULL (an image caption lives in ZWAMEDIAITEM.ZTITLE, never
+    # in ZTEXT) and ZFLAGS carries the 0x05000000 "has attachment" high
+    # byte. v0.1 mis-read exactly this shape as a deletion tombstone.
     conn.execute(
         "INSERT INTO ZWAMEDIAITEM VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (1, "images/abc/photo.jpg", 12345, None, None, None, None),
+        (1, "images/abc/photo.jpg", 12345, None, None, None, "photo caption"),
     )
     conn.execute(
         "INSERT INTO ZWAMESSAGE VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -422,9 +425,9 @@ def _seed_chatstorage(conn: sqlite3.Connection, *, group_id: int = 2) -> None:
             "33612345678@s.whatsapp.net",
             "me@s.whatsapp.net",
             f"STANZA-MEDIA-{pk}",
-            "photo caption",
+            None,  # live: type-1 rows never carry ZTEXT
             "Alice",
-            0x01000000,
+            0x05000000,  # live: "has attachment" high byte
             1,  # ZMEDIAITEM FK
             None,
             0,

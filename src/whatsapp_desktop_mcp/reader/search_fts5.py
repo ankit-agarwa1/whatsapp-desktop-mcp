@@ -130,6 +130,19 @@ _DDL_SYNC_STATE: str = (
     "CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
 )
 
+# The indexed body: ZTEXT, falling back to the media caption in
+# ZWAMEDIAITEM.ZTITLE (an image/video caption is never in ZTEXT). Bump
+# _INDEX_BODY_VERSION whenever this expression or the row set changes —
+# an existing sidecar is otherwise never rebuilt and keeps serving the
+# old index.
+_INDEX_BODY_SQL: str = (
+    "SELECT COALESCE(m.ZTEXT, mi.ZTITLE), m.ZCHATSESSION, m.ZFROMJID, m.ZMESSAGEDATE "
+    "FROM ZWAMESSAGE m "
+    "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM "
+    "WHERE COALESCE(m.ZTEXT, mi.ZTITLE) IS NOT NULL"
+)
+_INDEX_BODY_VERSION: str = "2"
+
 
 # ---------------------------------------------------------------------------
 # Sidecar connection helper.
@@ -215,9 +228,7 @@ def _full_rebuild(fts: sqlite3.Connection, ro: sqlite3.Connection, z_version: in
     """
     fts.execute("DROP TABLE IF EXISTS messages_fts")
     fts.execute(_DDL_FTS_VTABLE)
-    cursor = ro.execute(
-        "SELECT ZTEXT, ZCHATSESSION, ZFROMJID, ZMESSAGEDATE FROM ZWAMESSAGE WHERE ZTEXT IS NOT NULL"
-    )
+    cursor = ro.execute(_INDEX_BODY_SQL)
     count = 0
     max_date: float = 0.0
     fts.execute("BEGIN")
@@ -232,6 +243,7 @@ def _full_rebuild(fts: sqlite3.Connection, ro: sqlite3.Connection, z_version: in
             if row[3] is not None and float(row[3]) > max_date:
                 max_date = float(row[3])
         _write_sync_state(fts, "z_version", str(z_version))
+        _write_sync_state(fts, "body_version", _INDEX_BODY_VERSION)
         _write_sync_state(fts, "last_seen_z_message_date", str(max_date))
         fts.execute("COMMIT")
     except Exception:
@@ -245,12 +257,7 @@ def _incremental_refresh(fts: sqlite3.Connection, ro: sqlite3.Connection, last_s
 
     Updates ``sync_state['last_seen_z_message_date']`` to the new max.
     """
-    cursor = ro.execute(
-        "SELECT ZTEXT, ZCHATSESSION, ZFROMJID, ZMESSAGEDATE "
-        "FROM ZWAMESSAGE "
-        "WHERE ZTEXT IS NOT NULL AND ZMESSAGEDATE > ?",
-        (last_seen,),
-    )
+    cursor = ro.execute(_INDEX_BODY_SQL + " AND m.ZMESSAGEDATE > ?", (last_seen,))
     count = 0
     max_date: float = last_seen
     fts.execute("BEGIN")
@@ -292,7 +299,11 @@ def _build_or_refresh_blocking(db_path: str) -> None:
         prior_z_str = _read_sync_state(fts, "z_version")
         with open_ro(db_path) as ro:
             current_z = probe_z_version(ro)
-            full_rebuild_needed = prior_z_str is None or int(prior_z_str) != current_z
+            full_rebuild_needed = (
+                prior_z_str is None
+                or int(prior_z_str) != current_z
+                or _read_sync_state(fts, "body_version") != _INDEX_BODY_VERSION
+            )
             if full_rebuild_needed:
                 logger.warning(
                     "Building FTS5 shadow index — first search may take 10-30s "

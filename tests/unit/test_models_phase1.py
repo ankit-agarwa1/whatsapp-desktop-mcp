@@ -150,8 +150,7 @@ def test_media_ref_round_trip() -> None:
         mime="image/jpeg",
         size_bytes=12_345,
         duration_seconds=None,
-        latitude=None,
-        longitude=None,
+        caption=None,
     )
     raw = original.model_dump_json()
     assert MediaRef.model_validate_json(raw) == original
@@ -180,21 +179,21 @@ def test_chat_kind_literal_rejects_unknown() -> None:
         )
 
 
-def test_message_kind_literal_includes_other() -> None:
-    """``MessageKind`` accepts ``"other"`` — the catch-all bucket Plan 02 uses."""
+def test_message_kind_literal_includes_unknown() -> None:
+    """``MessageKind`` accepts ``"unknown"`` — the catch-all bucket Plan 02 uses."""
     msg = Message(
         message_id="X",
         chat_id=1,
         sender_jid=_sample_jid_phone(),
         timestamp=0,
         body=None,
-        kind="other",
+        kind="unknown",
         is_outgoing=False,
         is_starred=False,
         quoted_message_id=None,
         media=None,
     )
-    assert msg.kind == "other"
+    assert msg.kind == "unknown"
 
 
 def test_message_kind_literal_rejects_unknown() -> None:
