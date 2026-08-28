@@ -122,13 +122,26 @@ Tool annotation contract (D-20 / W-1)
   SendResult is ~1 KB so the budget is never close to being hit, the
   annotation is structural for client uniformity.
 
-REL-03 — 15 s outer-envelope per-tool timeout
-=============================================
-The orchestration's worst-case latency is ~14 s (10 s post-hoc poll +
-~3 s AX preflight + ~1 s deeplink settle); 15 s gives ~1 s slack. The
-inner per-tool-timeout decorator is INNERMOST (closest to the function
-body) and ``@mcp.tool`` is OUTERMOST per the Phase 1 documented
-ordering — FastMCP registers the timeout-wrapped callable.
+REL-03 — 15 s per-tool timeout, restarted after the human turn
+==============================================================
+The MACHINE latency is ~14 s worst case (10 s post-hoc poll + ~3 s AX
+preflight + ~1 s deeplink settle); 15 s gives ~1 s slack. The inner
+per-tool-timeout decorator is INNERMOST (closest to the function body)
+and ``@mcp.tool`` is OUTERMOST per the Phase 1 documented ordering —
+FastMCP registers the timeout-wrapped callable.
+
+That budget models machine work ONLY, and it always did — it allocates
+zero seconds to STEP 6, where the tool awaits a HUMAN reading the body
+verbatim (D-07, deliberately untruncated) and clicking confirm. So a
+long body meant a long read, the read plus the ~10 s machine phase blew
+the envelope, and the tool died at ``ctx.elicit`` — before ``press_return``
+ever fired, i.e. having sent nothing, while still writing its audit line
+from the ``finally``. STEP 6 therefore calls
+``_decorators.restart_timeout`` the instant the human turn ends: the
+elicitation no longer competes with the deep-link + verify steps for the
+same 15 s, and STEPS 7-11 get the full budget the number was chosen for.
+The envelope is NOT widened and the human is NOT put on a clock; only
+the accounting is corrected.
 
 W-4 import discipline (server.read_only_mode lazy attribute pattern)
 ====================================================================
@@ -196,7 +209,7 @@ from whatsapp_desktop_mcp.sender.audit import AuditEntry, body_sha256
 from whatsapp_desktop_mcp.sender.cross_chat_quote import OffendingSource
 from whatsapp_desktop_mcp.sender.ui_send import send_text
 from whatsapp_desktop_mcp.server import mcp
-from whatsapp_desktop_mcp.tools._decorators import timeout
+from whatsapp_desktop_mcp.tools._decorators import restart_timeout, suspend_timeout, timeout
 
 logger = logging.getLogger(__name__)
 
@@ -393,7 +406,18 @@ async def send_message(
                 rate_min_rem=rate_min_rem,
                 rate_day_rem=rate_day_rem,
             )
+            # REL-03: drop the deadline for the human turn. Restarting only
+            # AFTER the await is not enough — the scope fires while the task
+            # is suspended here, so a body long enough to read past the budget
+            # would kill the tool at this very line, having sent nothing.
+            suspend_timeout()
             result = await ctx.elicit(message=prompt, schema=ConfirmationSchema)
+            # REL-03: the human turn is over — restart the 15 s budget so the
+            # time the user spent READING the verbatim body is not charged
+            # against the machine steps (STEPS 7-11) that still have to run.
+            # Without this a long body times the tool out at this very line,
+            # having sent nothing.
+            restart_timeout()
             if isinstance(result, DeclinedElicitation | CancelledElicitation):
                 outcome = "cancelled"
                 return SendResult(

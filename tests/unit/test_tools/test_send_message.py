@@ -796,6 +796,52 @@ def test_send_message_15s_timeout_decorator_present() -> None:
     assert "@timeout(seconds=15)" in module_src, "REL-03 violation: missing @timeout(seconds=15)"
 
 
+@pytest.mark.asyncio
+async def test_send_message_restarts_timeout_after_the_elicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REL-03: the 15 s budget restarts once the human turn (STEP 6) ends.
+
+    The envelope was sized for machine work only (10 s verify poll + ~3 s AX
+    preflight + ~1 s deeplink settle) yet spanned ``ctx.elicit``, which renders
+    the body VERBATIM per D-07. A ~900-char body is a ~900-char read, and the
+    read plus the machine phase exceeded 15 s — the tool died at the elicit
+    with "Tool exceeded 15s timeout." having sent nothing. Restarting the
+    budget the moment the human answers is the fix; this pins the call site.
+    """
+    mocks = _install_happy_path_mocks(monkeypatch)
+    restarts: list[int] = []
+    monkeypatch.setattr(
+        send_message_module, "restart_timeout", lambda: restarts.append(len(restarts))
+    )
+
+    result = await send_message(chat_id=42, body="x" * 900, ctx=mocks["context"])
+
+    assert result.status == "sent"
+    # The confirmation gate ran (it is what the restart is compensating for) —
+    # a restructuring that dropped the elicit must not pass this test.
+    assert mocks["context"].elicit_calls != []
+    assert restarts == [0], "restart_timeout must run exactly once, after ctx.elicit"
+
+
+@pytest.mark.asyncio
+async def test_send_message_does_not_restart_timeout_when_confirm_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-08 skip-confirm means no human turn, so there is nothing to forgive."""
+    mocks = _install_happy_path_mocks(monkeypatch)
+    monkeypatch.setenv("WHATSAPP_DESKTOP_MCP_SKIP_CONFIRM", "1")
+    restarts: list[int] = []
+    monkeypatch.setattr(
+        send_message_module, "restart_timeout", lambda: restarts.append(len(restarts))
+    )
+
+    result = await send_message(chat_id=42, body="x" * 900, ctx=mocks["context"])
+
+    assert result.status == "sent"
+    assert restarts == []
+
+
 # ---------------------------------------------------------------------------
 # Cross-chat-quote check is invoked per D-25 step 4
 # ---------------------------------------------------------------------------
@@ -818,3 +864,35 @@ async def test_send_message_calls_cross_chat_quote_check_with_chat_id(
     await send_message(chat_id=42, body="hi", ctx=mocks["context"])
 
     assert check_calls == [(42, "hi")]
+
+
+@pytest.mark.asyncio
+async def test_send_message_suspends_timeout_before_the_elicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The suspend must bracket the human turn, not follow it.
+
+    Ordering IS the fix: ``restart_timeout`` after ``ctx.elicit`` cannot help,
+    because the scope fires while the task is suspended at that await. Only
+    dropping the deadline first survives a human turn longer than the budget.
+    """
+    order: list[str] = []
+    mocks = _install_happy_path_mocks(monkeypatch)
+    monkeypatch.setattr(send_message_module, "suspend_timeout", lambda: order.append("suspend"))
+    monkeypatch.setattr(send_message_module, "restart_timeout", lambda: order.append("restart"))
+
+    context = mocks["context"]
+    original_elicit = context.elicit
+
+    async def recording_elicit(*args: object, **kwargs: object) -> object:
+        order.append("elicit")
+        return await original_elicit(*args, **kwargs)
+
+    context.elicit = recording_elicit
+
+    result = await send_message(chat_id=42, body="x" * 900, ctx=context)
+
+    assert result.status == "sent"
+    assert order == ["suspend", "elicit", "restart"], (
+        f"suspend must precede the human turn, got {order}"
+    )
