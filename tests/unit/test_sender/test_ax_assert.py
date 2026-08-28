@@ -366,3 +366,76 @@ def test_assert_focused_chat_matches_error_message_includes_observed_headings(
     # The stripped names should appear in the diagnostic.
     assert "Alice Smith" in msg
     assert "Bob Jones" in msg
+
+
+# ---------------------------------------------------------------------------
+# Transient-sheet retry (verified live on WhatsApp 26.31.23)
+# ---------------------------------------------------------------------------
+#
+# While a deep-link opens a chat, WhatsApp raises a 4-node AXSheet over the
+# chat window. AXFocusedWindow resolves to that sheet, whose subtree has no
+# chat header, so the preflight observed an EMPTY candidate list and aborted
+# a send whose compose box was already prefilled. Retrying on empty fixes
+# that WITHOUT weakening the wrong-chat guard: a non-empty mismatch still
+# aborts on the first look.
+
+
+def _stub_ax(monkeypatch: pytest.MonkeyPatch, walk_results: list[list[str]]) -> dict[str, int]:
+    """Drive assert_focused_chat_matches with a scripted sequence of walks."""
+    calls = {"walk": 0, "sleep": 0}
+
+    monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", True)
+    monkeypatch.setattr(ax_assert, "_resolve_whatsapp_pid", lambda: 948)
+    monkeypatch.setattr(ax_assert, "AXUIElementCreateApplication", lambda _pid: object())
+    monkeypatch.setattr(ax_assert, "AXUIElementCopyAttributeValue", lambda *_a, **_k: (0, object()))
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["sleep"] += 1
+
+    monkeypatch.setattr("whatsapp_desktop_mcp.sender.ax_assert.time.sleep", fake_sleep)
+
+    def fake_walk(*_a: object, **_k: object) -> list[str]:
+        idx = min(calls["walk"], len(walk_results) - 1)
+        calls["walk"] += 1
+        return walk_results[idx]
+
+    monkeypatch.setattr(ax_assert, "_walk_for_heading", fake_walk)
+    return calls
+
+
+def test_transient_sheet_empty_walk_is_retried_until_header_appears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty candidate list is the sheet case — retry, then match."""
+    calls = _stub_ax(monkeypatch, [[], [], ["Nitin Stable Money"]])
+
+    ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+    assert calls["walk"] == 3, "should have retried past the two empty walks"
+    assert calls["sleep"] == 2, "should back off between retries"
+
+
+def test_wrong_chat_still_aborts_on_the_first_look(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-03 guard unchanged: a NON-empty mismatch must not be retried."""
+    calls = _stub_ax(monkeypatch, [["Mom"], ["Nitin Stable Money"]])
+
+    with pytest.raises(ChatHeaderMismatch) as excinfo:
+        ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+    assert calls["walk"] == 1, "a readable wrong chat must fail fast, not retry"
+    assert calls["sleep"] == 0
+    assert "'Mom'" in str(excinfo.value)
+
+
+def test_persistently_unreadable_header_exhausts_retries_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the header never becomes readable, the send still aborts."""
+    calls = _stub_ax(monkeypatch, [[]])
+
+    with pytest.raises(ChatHeaderMismatch):
+        ax_assert.assert_focused_chat_matches("Nitin Stable Money")
+
+    assert calls["walk"] == ax_assert._HEADER_SETTLE_ATTEMPTS

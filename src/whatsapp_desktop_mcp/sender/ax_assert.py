@@ -112,6 +112,7 @@ without yielding.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from whatsapp_desktop_mcp.exceptions import (
@@ -189,6 +190,20 @@ _CHAT_HEADER_IDENTIFIER = "NavigationBar_HeaderViewButton"
 # locked this set: the topmost clickable search result is an AXButton
 # whose AXDescription carries the chat display name (verified live).
 _SIDEBAR_RESULT_ROLES: frozenset[str] = frozenset({"AXHeading", "AXButton"})
+
+
+# Retry budget for an UNREADABLE focused-chat header. WhatsApp raises a
+# transient AXSheet over the chat window while a deep-link opens (verified
+# live on 26.31.23: a 4-node sheet, where the settled window walks ~84
+# nodes). AXFocusedWindow resolves to that sheet, whose subtree holds no
+# chat header at all, so a single-shot preflight aborted sends that were
+# about to be correct — the deep-link had already prefilled the compose
+# box and only the Return keystroke was missing.
+#
+# 10 x 0.15 s = 1.35 s worst case, comfortably inside the send tool's
+# budget and only paid when the header is unreadable.
+_HEADER_SETTLE_ATTEMPTS = 10
+_HEADER_SETTLE_INTERVAL_S = 0.15
 
 
 def _strip_bidi(s: str) -> str:
@@ -325,18 +340,35 @@ def assert_focused_chat_matches(expected_chat_name: str) -> None:
         )
 
     app = AXUIElementCreateApplication(pid)
-    err, window = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, None)
+
+    # Retry ONLY while the candidate list is EMPTY — i.e. "the header could
+    # not be read", the transient-sheet case above. A NON-empty list that
+    # does not match is a genuine wrong-chat condition and still aborts on
+    # the first look, so the D-03 wrong-chat guard is unchanged in
+    # strength; only the unreadable case is given more time.
+    headings: list[str] = []
+    err = 0
+    window = None
+    for attempt in range(_HEADER_SETTLE_ATTEMPTS):
+        if attempt:
+            time.sleep(_HEADER_SETTLE_INTERVAL_S)
+        err, window = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, None)
+        if err != 0 or window is None:
+            continue
+        headings = _walk_for_heading(
+            window,
+            roles=_DEFAULT_HEADING_ROLES,
+            identifier=_CHAT_HEADER_IDENTIFIER,
+        )
+        if headings:
+            break
+
     if err != 0 or window is None:
         raise ChatHeaderMismatch(
             f"AXFocusedWindow lookup failed (err={err}); cannot verify chat header — "
             "bring WhatsApp Desktop to foreground and retry"
         )
 
-    headings = _walk_for_heading(
-        window,
-        roles=_DEFAULT_HEADING_ROLES,
-        identifier=_CHAT_HEADER_IDENTIFIER,
-    )
     expected = _strip_bidi(expected_chat_name).casefold()
 
     for h in headings:
