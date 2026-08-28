@@ -793,6 +793,15 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
 
     # _PYOBJC_AVAILABLE may have been set False at import time on non-mac
     # CI; force True so the public callables exercise the AX-walk path.
+    # pyobjc ships in the optional [send] extra. Without it the AX symbols this
+    # fixture fakes (NSWorkspace, AXUIElementCreateApplication, the kAX*
+    # constants) do not exist on the module at all, so there is nothing
+    # meaningful to patch. Skip rather than fake a surface that is absent — the
+    # base install genuinely has no AX path, and CI's [dev,send] matrix covers
+    # these tests in full.
+    if not getattr(ax_assert, "_PYOBJC_AVAILABLE", False):
+        pytest.skip("requires the optional [send] extra (pyobjc)")
+
     monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", True)
 
     # The pyobjc symbols (``kAXFocusedWindowAttribute`` etc.) are imported

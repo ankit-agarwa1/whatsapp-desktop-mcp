@@ -123,6 +123,22 @@ files = ["src", "tests"]
 module = "pytest_subprocess.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# pyobjc lives in the optional [send] extra, so mypy must type-check cleanly
+# BOTH with it installed and without it. Without the extra the modules are
+# genuinely absent (import-not-found); with it they are present but unstubbed
+# (import-untyped). ignore_missing_imports covers the absent case.
+module = ["ApplicationServices.*", "Cocoa.*", "Quartz.*", "objc.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# ...and because the same `type: ignore` comment is REQUIRED when pyobjc is
+# installed but UNUSED when it is not, warn_unused_ignores has to be off for
+# the one module that imports it. Otherwise the two CI matrices contradict
+# each other: whichever comment satisfies one fails the other.
+module = "whatsapp_desktop_mcp.sender.ax_assert"
+warn_unused_ignores = false
+
 # ---------- Tests ----------
 [tool.pytest.ini_options]
 minversion = "8.2"
