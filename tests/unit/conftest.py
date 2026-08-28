@@ -759,6 +759,14 @@ class _AXFake:
         self.focused_window_err: int = 0
         self.focused_window_value: object | None = object()  # sentinel "window" element
         self.walk_returns: list[str] = []
+        # Richer alternative to ``walk_returns`` for tests that need a
+        # node's role / AXIdentifier / nesting to differ from the flat
+        # all-AXHeading default. Each entry is a dict with optional keys
+        # ``role`` (default "AXHeading"), ``identifier`` (default: the
+        # attribute is unsupported on that node), ``label`` (the
+        # AXDescription) and ``children`` (a nested list of the same
+        # shape). When set, this REPLACES ``walk_returns``.
+        self.walk_tree: list[dict[str, object]] | None = None
         # When set to a positive int, ``_walk_for_heading`` should observe
         # at least this many AXChildren cycles before terminating (DoS
         # guard test).
@@ -818,6 +826,7 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
     k_role = getattr(ax_assert, "kAXRoleAttribute", None)
     k_desc = getattr(ax_assert, "kAXDescriptionAttribute", None)
     k_title = getattr(ax_assert, "kAXTitleAttribute", None)
+    k_identifier = getattr(ax_assert, "kAXIdentifierAttribute", None)
 
     # NSWorkspace.sharedWorkspace().runningApplications() — return a
     # single fake app whose bundleIdentifier matches WhatsApp.app when
@@ -854,15 +863,37 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
     # fixture lifecycle.
     headings_nodes: list[object] = []
     label_for: dict[int, str] = {}  # id(node) -> label
+    role_for: dict[int, str] = {}  # id(node) -> AXRole
+    ident_for: dict[int, str] = {}  # id(node) -> AXIdentifier (absent = unsupported)
+    kids_for: dict[int, list[object]] = {}  # id(node) -> child nodes
     built = [False]
+
+    def _build_node(spec: dict[str, object]) -> object:
+        n = object()
+        label_for[id(n)] = str(spec.get("label", ""))
+        role_for[id(n)] = str(spec.get("role", "AXHeading"))
+        ident = spec.get("identifier")
+        if ident is not None:
+            ident_for[id(n)] = str(ident)
+        # ``kids_for`` holds the only strong reference to nested nodes, so
+        # their ``id()`` keys stay valid for the life of the fixture.
+        raw_kids = spec.get("children")
+        children = raw_kids if isinstance(raw_kids, list) else []
+        kids_for[id(n)] = [_build_node(c) for c in children]
+        return n
 
     def _build_graph_if_needed() -> None:
         if built[0]:
             return
-        for label in fake.walk_returns:
-            n = object()
-            headings_nodes.append(n)
-            label_for[id(n)] = label
+        if fake.walk_tree is not None:
+            headings_nodes.extend(_build_node(spec) for spec in fake.walk_tree)
+        else:
+            for label in fake.walk_returns:
+                n = object()
+                headings_nodes.append(n)
+                label_for[id(n)] = label
+                role_for[id(n)] = "AXHeading"
+                kids_for[id(n)] = []
         built[0] = True
 
     def _copy_attr(elem: object, attr: object, _none: object) -> tuple[int, object]:
@@ -879,13 +910,19 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
             # DFS at heading depth (good — these nodes carry the labels).
             if elem is fake.focused_window_value:
                 return (0, list(headings_nodes))
-            return (0, [])
+            return (0, kids_for.get(id(elem), []))
         if attr is k_role:
             _build_graph_if_needed()
             fake.role_calls += 1
-            if id(elem) in label_for:
-                return (0, "AXHeading")
-            return (0, "AXWindow")
+            return (0, role_for.get(id(elem), "AXWindow"))
+        if attr is k_identifier:
+            _build_graph_if_needed()
+            node_id = ident_for.get(id(elem))
+            if node_id is None:
+                # Real AX returns kAXErrorAttributeUnsupported for a node
+                # that carries no AXIdentifier.
+                return (-25205, None)
+            return (0, node_id)
         if attr is k_desc:
             _build_graph_if_needed()
             label = label_for.get(id(elem))

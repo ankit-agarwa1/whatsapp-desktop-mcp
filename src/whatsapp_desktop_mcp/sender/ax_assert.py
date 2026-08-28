@@ -39,14 +39,23 @@ characters) so the source file stays grep-stable: the raw characters
 would render as zero-width invisibles in source viewers and would pollute
 downstream literal-token greps with ghost matches.
 
-**Bounded depth-first walk** (vs. hardcoded attribute path): the chat
-header sits at variable depth in the AXGroup tree — observed live the
-path is ``AXWindow → AXGroup → AXGroup → ... → AXHeading`` with depth
-depending on whether the sidebar is collapsed. The walk caps at
-``_MAX_WALK_NODES = 200`` visited nodes (DoS guard T-02-01-04); a
-pathological window with millions of nodes would be aborted with a
-"no match" result (raising :class:`ChatHeaderMismatch`) rather than
-spinning forever and freeing the OOM/CPU bomb scenario.
+**Bounded breadth-first walk** (vs. hardcoded attribute path): the chat
+header sits at variable depth in the AXGroup tree — observed live on
+26.31.23 at ``AXWindow → AXGroup → AXGroup → AXGroup(Toolbar) →
+AXButton``, with depth depending on whether the sidebar is collapsed.
+The walk caps at ``_MAX_WALK_NODES = 200`` visited nodes (DoS guard
+T-02-01-04); a pathological window with millions of nodes would be
+aborted with a "no match" result (raising :class:`ChatHeaderMismatch`)
+rather than spinning forever and freeing the OOM/CPU bomb scenario.
+
+The traversal is breadth-first (FIFO) on purpose. Depth-first (LIFO)
+descends into the last-pushed subtree first, which is the message list —
+one AX node per rendered bubble — so on a chat with a long rendered
+backlog the 200-node budget was exhausted *before* the walk ever reached
+the shallow chrome holding the header, and the preflight reported an
+empty observed list. Breadth-first reaches the header within the first
+~15 pops regardless of backlog size, which makes the cap a pure cost
+bound instead of a correctness hazard.
 
 **Casefold + substring** (vs. equality): the focused chat header in
 WhatsApp Catalyst may carry a locale-dependent suffix
@@ -56,10 +65,24 @@ substring match accommodates locale variation while still failing on
 the wrong-chat scenario (a completely different chat name will not
 substring-match).
 
-**SP-3 locked role filter:** only ``AXHeading`` is collected by the
-default walk. Widening to ``AXStaticText`` would catastrophically
+**SP-3 locked role filter:** only ``AXHeading`` is collected by role in
+the default walk. Widening to ``AXStaticText`` would catastrophically
 false-positive on message body content (any message bubble containing
 the expected chat name would falsely "match" the chat header).
+
+**Identifier-selected header (WhatsApp ≥ 26.31.23):** SP-3 is honoured —
+the role set is NOT widened. On 26.31.23 the focused-chat header is no
+longer an ``AXHeading`` at all: it is an ``AXButton`` carrying
+``AXIdentifier == "NavigationBar_HeaderViewButton"``, while the window's
+only ``AXHeading`` is the sidebar title "Chats". The default walk
+therefore also selects nodes by that exact AXIdentifier (see
+``_CHAT_HEADER_IDENTIFIER``), and prefers identifier-selected labels over
+role-selected ones when both are present. Selecting on an exact
+identifier is strictly *narrower* than the role filter, not wider: it
+cannot admit message bubbles (``WAMessageBubbleTableViewCell``), sidebar
+chat rows (no identifier at all), the call buttons beside the header (no
+identifier), or "New Chat" (``NavigationBar_NewChatButton``) — all
+verified live on 26.31.23, pid 948.
 
 **SP-5 locked role widening for the group-fallback first-result
 preflight:** ``_assert_first_search_result_matches`` calls the same
@@ -109,6 +132,7 @@ try:
         kAXChildrenAttribute,
         kAXDescriptionAttribute,
         kAXFocusedWindowAttribute,
+        kAXIdentifierAttribute,
         kAXRoleAttribute,
         kAXTitleAttribute,
     )
@@ -152,6 +176,15 @@ _MAX_WALK_NODES = 200
 _DEFAULT_HEADING_ROLES: frozenset[str] = frozenset({"AXHeading"})
 
 
+# Exact AXIdentifier of the focused-chat header node (verified live on
+# WhatsApp 26.31.23, pid 948: the single node in the focused window carrying
+# it, an AXButton whose AXDescription is the chat display name). This is a
+# selector, NOT an SP-3 role widening — no extra role is admitted, so the
+# message-body false-positive class SP-3 guards against stays impossible.
+# On 26.16.74 no node carries it and the walk falls back to AXHeading.
+_CHAT_HEADER_IDENTIFIER = "NavigationBar_HeaderViewButton"
+
+
 # Widened role filter for the sidebar-search first-result preflight. SP-5
 # locked this set: the topmost clickable search result is an AXButton
 # whose AXDescription carries the chat display name (verified live).
@@ -191,44 +224,63 @@ def _walk_for_heading(
     elem: Any,
     *,
     roles: frozenset[str] = _DEFAULT_HEADING_ROLES,
+    identifier: str | None = None,
 ) -> list[str]:
-    """Bounded depth-first walk; collect AX-label strings under ``elem``.
+    """Bounded breadth-first walk; collect AX-label strings under ``elem``.
 
-    For every node whose ``AXRole`` is in ``roles``, both ``AXDescription``
-    and ``AXTitle`` are read and any non-empty string value is appended to
-    the result list. Children are enqueued via ``AXChildren``.
+    For every node whose ``AXRole`` is in ``roles`` — or, when
+    ``identifier`` is given, whose ``AXIdentifier`` equals it exactly —
+    both ``AXDescription`` and ``AXTitle`` are read and any non-empty
+    string value is collected. Children are enqueued via ``AXChildren``.
+
+    When ``identifier`` matched at least one node, ONLY the
+    identifier-selected labels are returned; the role-selected ones are
+    dropped. On 26.31.23 the role-selected set is the sidebar title
+    ("Chats"), which is not the focused chat and must not be offered to
+    the caller's match loop as if it were.
 
     SP-3-locked default roles: ``{"AXHeading"}``. SP-5-widened roles for
     the sidebar-result preflight: ``{"AXHeading", "AXButton"}``.
+
+    Breadth-first (``pop(0)``), not depth-first: LIFO descended into the
+    message-list subtree first and burned the node budget before reaching
+    the shallow header — see the module docstring.
 
     The walk is bounded at ``_MAX_WALK_NODES`` visited nodes; exhaustion
     returns whatever was collected so far (the caller's
     :class:`ChatHeaderMismatch` raise will surface as "no match found").
     """
     headings: list[str] = []
+    by_identifier: list[str] = []
     queue: list[Any] = [elem]
     visited = 0
     while queue and visited < _MAX_WALK_NODES:
-        node = queue.pop()
+        node = queue.pop(0)
         visited += 1
 
         # SP-4 locked return shape: AXUIElementCopyAttributeValue returns
         # tuple[err: int, value]. err == 0 means success.
+        matched_identifier = False
+        if identifier is not None:
+            id_err, node_id = AXUIElementCopyAttributeValue(node, kAXIdentifierAttribute, None)
+            matched_identifier = id_err == 0 and node_id == identifier
+
         role_err, role = AXUIElementCopyAttributeValue(node, kAXRoleAttribute, None)
-        if role_err == 0 and role in roles:
+        if matched_identifier or (role_err == 0 and role in roles):
+            sink = by_identifier if matched_identifier else headings
             desc_err, desc = AXUIElementCopyAttributeValue(node, kAXDescriptionAttribute, None)
             if desc_err == 0 and isinstance(desc, str) and desc:
-                headings.append(desc)
+                sink.append(desc)
             title_err, title = AXUIElementCopyAttributeValue(node, kAXTitleAttribute, None)
             if title_err == 0 and isinstance(title, str) and title:
-                headings.append(title)
+                sink.append(title)
 
         kids_err, kids = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, None)
         if kids_err == 0 and kids:
             # __NSArrayM iterates as a Python list of AXUIElementRef.
             queue.extend(kids)
 
-    return headings
+    return by_identifier or headings
 
 
 def assert_focused_chat_matches(expected_chat_name: str) -> None:
@@ -243,8 +295,10 @@ def assert_focused_chat_matches(expected_chat_name: str) -> None:
     3. Create an AX element for the application, read its
        ``AXFocusedWindow`` attribute. On failure, raise
        :class:`ChatHeaderMismatch`.
-    4. Walk the focused window's AX tree (bounded DFS at 200 nodes) and
-       collect every ``AXHeading`` description/title.
+    4. Walk the focused window's AX tree (bounded BFS at 200 nodes) and
+       collect the chat-header description/title: the node whose
+       ``AXIdentifier`` is ``NavigationBar_HeaderViewButton`` (WhatsApp
+       ≥ 26.31.23) if present, else every ``AXHeading`` (≤ 26.16.74).
     5. Strip bidi invisibles + casefold both sides. If the expected name
        (after strip + casefold) appears as a substring of ANY observed
        heading (after strip + casefold), the send is safe — return.
@@ -278,7 +332,11 @@ def assert_focused_chat_matches(expected_chat_name: str) -> None:
             "bring WhatsApp Desktop to foreground and retry"
         )
 
-    headings = _walk_for_heading(window, roles=_DEFAULT_HEADING_ROLES)
+    headings = _walk_for_heading(
+        window,
+        roles=_DEFAULT_HEADING_ROLES,
+        identifier=_CHAT_HEADER_IDENTIFIER,
+    )
     expected = _strip_bidi(expected_chat_name).casefold()
 
     for h in headings:
@@ -291,7 +349,7 @@ def assert_focused_chat_matches(expected_chat_name: str) -> None:
 
     raise ChatHeaderMismatch(
         f"Focused chat header does not match expected={expected_chat_name!r}; "
-        f"observed AXHeading values (stripped) = "
+        f"observed chat-header candidates (stripped) = "
         f"{[_strip_bidi(h) for h in headings]}"
     )
 
