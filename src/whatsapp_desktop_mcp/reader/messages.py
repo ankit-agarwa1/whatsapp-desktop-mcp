@@ -58,23 +58,42 @@ from whatsapp_desktop_mcp.time import cocoa_to_unix, unix_to_cocoa
 _Z_SORT_SENTINEL: float = 1e18
 
 
-# Verified-live ZMESSAGETYPE distribution → MessageKind. Anything not in
-# this table maps to "other" (RESEARCH §"Core Data Schema Essentials →
-# ZWAMESSAGE → ZMESSAGETYPE row").
+# ZMESSAGETYPE -> MessageKind, derived from the live corpus by file
+# extension / ZGROUPEVENTTYPE / real-lat-long inspection, not from the
+# type number's name. Anything absent maps to "unknown" — a bodyless
+# group-event type mislabelled as "sticker" is worse than "unknown".
+#
+# Corrections against v0.1, all evidence-backed:
+#   5  location   was unmapped   only type with real lat/long
+#   7  text       was "location" 776/776 carry a URL in ZTEXT + a
+#                                link-preview title in ZTITLE
+#   8  document   was "contact"  pdf/csv/xlsx/zip/apk/docx on disk
+#   10 system     was "sticker"  986 rows, all ZGROUPEVENTTYPE, no media
+#   11 video      was "call"     99/100 have an .mp4 on disk
+#   15 sticker    was "ephemeral" 82/83 are .webp
+# 59 ("poll") and 66 ("reaction") were dropped: no positive evidence,
+# and all 219 type-66 rows have a NULL ZPARENTMESSAGE, which argues
+# against "reaction".
 _MESSAGE_TYPE_MAP: dict[int, MessageKind] = {
     0: "text",
     1: "image",
     2: "video",
     3: "audio",
+    4: "contact",  # ZVCARDSTRING = literal BEGIN:VCARD
+    5: "location",
     6: "system",
-    7: "location",
-    8: "contact",
-    10: "sticker",
-    11: "call",
+    7: "text",  # text with a link preview
+    8: "document",
+    10: "system",
+    11: "video",  # GIF / animated short, stored as .mp4
     14: "revoked",
-    15: "ephemeral",
-    59: "poll",
-    66: "reaction",
+    15: "sticker",
+    20: "image",  # business/template image, caption in ZTITLE
+    23: "video",
+    24: "document",
+    41: "text",  # marketing/template text
+    42: "image",  # template image with caption
+    43: "video",  # template video with caption
 }
 
 
@@ -118,13 +137,13 @@ def _parse_jid(raw: str | None) -> Jid:
 def _classify_kind(raw_type: object) -> MessageKind:
     """Return ``MessageKind`` for a row's ``ZMESSAGETYPE`` value.
 
-    Unknown integers (e.g. the verified-live 12 / 20 / 78 rows whose
-    semantics we have not pinned down) map to ``"other"`` per the
-    locked Plan 01 ``MessageKind`` Literal.
+    Types whose semantics we have not pinned down (12 / 19 / 46 / 66 /
+    ...) map to ``"unknown"`` — never to a specific kind we cannot
+    evidence.
     """
     if not isinstance(raw_type, int):
-        return "other"
-    return _MESSAGE_TYPE_MAP.get(raw_type, "other")
+        return "unknown"
+    return _MESSAGE_TYPE_MAP.get(raw_type, "unknown")
 
 
 def _row_to_message(

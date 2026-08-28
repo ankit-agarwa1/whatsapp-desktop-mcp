@@ -13,8 +13,8 @@ against the same threat class as ``lharries/whatsapp-desktop-mcp#241`` (T-02-02)
   — anything escaping the WhatsApp media root returns ``None``.
 
 DATA-04 invariant: this module reads ONLY metadata columns
-(``ZMEDIALOCALPATH``, ``ZFILESIZE``, ``ZMOVIEDURATION``, ``ZLATITUDE``,
-``ZLONGITUDE``, ``ZTITLE``). The encrypted/protobuf BLOB columns
+(``ZMEDIALOCALPATH``, ``ZFILESIZE``, ``ZMOVIEDURATION``, ``ZTITLE``).
+The encrypted/protobuf BLOB columns
 named in CLAUDE.md hard rule #4 anti-pattern (the encryption key
 column and the protobuf metadata column on ``ZWAMEDIAITEM``, plus
 the receipt-info column on ``ZWAMESSAGEINFO``) are silently omitted
@@ -51,7 +51,7 @@ def resolve_media_ref(row: sqlite3.Row, media_root: str | Path) -> MediaRef | No
             that ``LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM``.
             Columns expected (may be NULL for non-media rows):
             ``ZMEDIALOCALPATH``, ``ZFILESIZE``, ``ZMOVIEDURATION``,
-            ``ZLATITUDE``, ``ZLONGITUDE``.
+            ``ZTITLE``.
         media_root: The WhatsApp media tree root, typically
             :func:`whatsapp_desktop_mcp.paths.resolve_media_root`. The prefix
             check refuses any resolved path that does NOT start with
@@ -102,8 +102,10 @@ def resolve_media_ref(row: sqlite3.Row, media_root: str | Path) -> MediaRef | No
 
     size_bytes = _coerce_int(_safe_get(row, "ZFILESIZE"), default=0)
     duration_seconds = _coerce_float_or_none(_safe_get(row, "ZMOVIEDURATION"))
-    latitude = _coerce_float_or_none(_safe_get(row, "ZLATITUDE"))
-    longitude = _coerce_float_or_none(_safe_get(row, "ZLONGITUDE"))
+    # An image/video caption lives in ZWAMEDIAITEM.ZTITLE, never in
+    # ZWAMESSAGE.ZTEXT (verified live: 0 of 5280 type-1 rows have ZTEXT).
+    raw_caption = _safe_get(row, "ZTITLE")
+    caption = str(raw_caption) if raw_caption else None
 
     return MediaRef(
         local_path=abs_str,
@@ -111,8 +113,7 @@ def resolve_media_ref(row: sqlite3.Row, media_root: str | Path) -> MediaRef | No
         mime=mime,
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,
-        latitude=latitude,
-        longitude=longitude,
+        caption=caption,
     )
 
 

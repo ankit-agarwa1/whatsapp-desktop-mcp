@@ -16,8 +16,15 @@ DATA-04 forbids parsing ``ZWAMEDIAITEM.ZMEDIAKEY`` and
 ``ZWAMEDIAITEM.ZMETADATA`` (encrypted / protobuf BLOBs) and
 ``ZWAMESSAGEINFO.ZRECEIPTINFO`` (also encrypted). This model exposes
 NONE of those fields — only the metadata columns
-(``ZMEDIALOCALPATH``, ``ZFILESIZE``, ``ZMOVIEDURATION``, ``ZLATITUDE``,
-``ZLONGITUDE``, ``ZTITLE``) verified live on the user's Mac.
+(``ZMEDIALOCALPATH``, ``ZFILESIZE``, ``ZMOVIEDURATION``, ``ZTITLE``)
+verified live on the user's Mac.
+
+``ZWAMEDIAITEM.ZLATITUDE`` / ``ZLONGITUDE`` are deliberately NOT
+surfaced: on a file-backed media row they hold the image/video pixel
+dimensions, not coordinates (verified live — type 1 "latitude" ranges
+16.0..4160.0). Real coordinates only exist on ``ZMESSAGETYPE = 5``
+rows, which carry no ``ZMEDIALOCALPATH`` and therefore never produce a
+``MediaRef`` at all.
 """
 
 from __future__ import annotations
@@ -33,5 +40,4 @@ class MediaRef(BaseModel):
     mime: str
     size_bytes: int
     duration_seconds: float | None = None
-    latitude: float | None = None
-    longitude: float | None = None
+    caption: str | None = None

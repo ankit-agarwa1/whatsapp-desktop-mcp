@@ -87,11 +87,7 @@ def _aliased_tombstone_where(alias: str = "m") -> str:
     user input ever flows through this function (T-02-01 mitigation).
     """
     prefix = f"{alias}."
-    return (
-        TOMBSTONE_SQL_WHERE.replace("ZMESSAGETYPE", prefix + "ZMESSAGETYPE")
-        .replace("ZTEXT IS NULL", prefix + "ZTEXT IS NULL")
-        .replace("ZFLAGS", prefix + "ZFLAGS")
-    )
+    return TOMBSTONE_SQL_WHERE.replace("ZMESSAGETYPE", prefix + "ZMESSAGETYPE")
 
 
 _M_TOMBSTONE_WHERE: str = _aliased_tombstone_where("m")
@@ -105,8 +101,7 @@ _MESSAGE_SELECT_LIST: str = (
     "SELECT m.Z_PK, m.ZCHATSESSION, m.ZGROUPMEMBER, m.ZMESSAGETYPE, m.ZISFROMME, "
     "m.ZSORT, m.ZMESSAGEDATE, m.ZFROMJID, m.ZTOJID, m.ZSTANZAID, m.ZTEXT, "
     "m.ZPUSHNAME, m.ZFLAGS, m.ZMEDIAITEM, m.ZPARENTMESSAGE, m.ZSTARRED, "
-    "mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, "
-    "mi.ZLATITUDE, mi.ZLONGITUDE, mi.ZTITLE "
+    "mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, mi.ZTITLE "
     "FROM ZWAMESSAGE m "
     "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM "
 )
@@ -209,8 +204,7 @@ _SQL_CONTEXT_AROUND_STANZA: str = (
     "SELECT m.Z_PK, m.ZCHATSESSION, m.ZGROUPMEMBER, m.ZMESSAGETYPE, m.ZISFROMME, "
     "m.ZSORT, m.ZMESSAGEDATE, m.ZFROMJID, m.ZTOJID, m.ZSTANZAID, m.ZTEXT, "
     "m.ZPUSHNAME, m.ZFLAGS, m.ZMEDIAITEM, m.ZPARENTMESSAGE, m.ZSTARRED, "
-    "mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, "
-    "mi.ZLATITUDE, mi.ZLONGITUDE, mi.ZTITLE "
+    "mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, mi.ZTITLE "
     "FROM ZWAMESSAGE m "
     "JOIN target t ON m.ZCHATSESSION = t.ZCHATSESSION "
     "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM "
@@ -228,8 +222,7 @@ _SQL_CONTEXT_AROUND_STANZA_INCLUDE_DELETED: str = (
     "SELECT m.Z_PK, m.ZCHATSESSION, m.ZGROUPMEMBER, m.ZMESSAGETYPE, m.ZISFROMME, "
     "m.ZSORT, m.ZMESSAGEDATE, m.ZFROMJID, m.ZTOJID, m.ZSTANZAID, m.ZTEXT, "
     "m.ZPUSHNAME, m.ZFLAGS, m.ZMEDIAITEM, m.ZPARENTMESSAGE, m.ZSTARRED, "
-    "mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, "
-    "mi.ZLATITUDE, mi.ZLONGITUDE, mi.ZTITLE "
+    "mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, mi.ZTITLE "
     "FROM ZWAMESSAGE m "
     "JOIN target t ON m.ZCHATSESSION = t.ZCHATSESSION "
     "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM "
@@ -281,8 +274,7 @@ _SQL_GROUP_MEMBERS: str = (
 # caller. Default include_deleted=False inlines the tombstone filter.
 _SQL_LIKE_SEARCH: str = (
     _MESSAGE_SELECT_LIST
-    + "WHERE m.ZTEXT IS NOT NULL "
-    + "AND LOWER(m.ZTEXT) LIKE LOWER('%' || ? || '%') "
+    + "WHERE LOWER(COALESCE(m.ZTEXT, mi.ZTITLE)) LIKE LOWER('%' || ? || '%') "
     + "AND "
     + _M_TOMBSTONE_WHERE
     + " "
@@ -297,8 +289,7 @@ _SQL_LIKE_SEARCH: str = (
 
 _SQL_LIKE_SEARCH_INCLUDE_DELETED: str = (
     _MESSAGE_SELECT_LIST
-    + "WHERE m.ZTEXT IS NOT NULL "
-    + "AND LOWER(m.ZTEXT) LIKE LOWER('%' || ? || '%') "
+    + "WHERE LOWER(COALESCE(m.ZTEXT, mi.ZTITLE)) LIKE LOWER('%' || ? || '%') "
     + "AND (? IS NULL OR m.ZCHATSESSION = ?) "
     + "AND (? IS NULL OR m.ZFROMJID = ?) "
     + "AND (? IS NULL OR m.ZMESSAGEDATE >= ?) "

@@ -48,13 +48,9 @@ async def test_list_chats_carries_per_chat_coverage(monkeypatch_paths: None) -> 
 async def test_window_default_filters_tombstones(monkeypatch_paths: None) -> None:
     """``window(include_deleted=False)`` excludes the seeded tombstones."""
     messages, _last = await reader.window(chat_id=1, limit=500)
-    # No type-14 messages, no high-bit + null-text rows.
+    # Only ZMESSAGETYPE=14 is a tombstone. Bodyless media is NOT.
     for m in messages:
         assert m.kind != "revoked"
-        # The reader projects high-bit-null-text rows out via SQL filter,
-        # so we should never see a Message whose body is None coming from
-        # one of those rows. (Genuine no-caption media survives because
-        # the flag pattern is 0x01000000.)
 
 
 @pytest.mark.asyncio
@@ -189,3 +185,23 @@ async def test_find_chat_by_jid_resolves(monkeypatch_paths: None) -> None:
     chat = await reader.find_chat_by_jid("33612345678@s.whatsapp.net")
     assert chat is not None
     assert chat.chat_id == 1
+
+
+@pytest.mark.asyncio
+async def test_uncaptioned_media_message_survives_default_filter(
+    monkeypatch_paths: None,
+) -> None:
+    """A live-shaped media row (ZTEXT NULL, ZFLAGS 0x05000000) is returned, with its file.
+
+    Regression for the v0.1 tombstone predicate, which read the
+    "has attachment" ZFLAGS high byte as a deletion marker and dropped
+    91% of all attachments from every read tool.
+    """
+    messages, _last = await reader.window(chat_id=1, limit=500)
+    media_msg = next((m for m in messages if m.message_id.startswith("STANZA-MEDIA-")), None)
+    assert media_msg is not None, "uncaptioned media message was filtered out"
+    assert media_msg.kind == "image"
+    assert media_msg.body is None
+    assert media_msg.media is not None
+    assert media_msg.media.local_path.endswith("/images/abc/photo.jpg")
+    assert media_msg.media.caption == "photo caption"
