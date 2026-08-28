@@ -198,3 +198,74 @@ async def test_type_string_rejects_first_non_bmp_codepoint(
     # the first offending code point seen during the linear scan.
     with pytest.raises(OsascriptError, match=r"U\+1F389"):
         await osascript_send.type_string("party 🎉🚀")
+
+
+# ---------------------------------------------------------------------------
+# press_return targets WhatsApp (verified-live regression)
+# ---------------------------------------------------------------------------
+#
+# `System Events` keystrokes go to the FRONTMOST app, but the deep-link is
+# spawned with `open -g`, which deliberately leaves WhatsApp in the
+# background. Without an activate, the Return landed in whatever app the user
+# had in front: the body stayed in WhatsApp's compose box unsent while
+# osascript exited 0, so the caller reported `sent_unverified` for a send that
+# never happened. Verified live on 26.31.23.
+
+
+@pytest.mark.asyncio
+async def test_press_return_activates_whatsapp_before_keystroking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The activate must precede the keystroke, or the Return goes elsewhere."""
+    scripts: list[str] = []
+
+    async def fake(script: str, timeout: float = 3.0) -> OsascriptResult:
+        scripts.append(script)
+        return OsascriptResult(exit_code=0, stdout="", stderr="", error_code=None)
+
+    monkeypatch.setattr(osascript_send, "run_osascript", fake)
+    monkeypatch.setattr(osascript_send, "_ACTIVATE_SETTLE_S", 0)
+
+    await osascript_send.press_return()
+
+    assert len(scripts) == 2, f"expected activate + keystroke, got {scripts}"
+    assert 'tell application "WhatsApp" to activate' == scripts[0]
+    assert "keystroke return" in scripts[1]
+
+
+@pytest.mark.asyncio
+async def test_press_return_does_not_keystroke_when_activate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed activate must abort — keystroking into the wrong app is the bug."""
+    scripts: list[str] = []
+
+    async def fake(script: str, timeout: float = 3.0) -> OsascriptResult:
+        scripts.append(script)
+        return OsascriptResult(exit_code=1, stdout="", stderr="boom", error_code=None)
+
+    monkeypatch.setattr(osascript_send, "run_osascript", fake)
+    monkeypatch.setattr(osascript_send, "_ACTIVATE_SETTLE_S", 0)
+
+    with pytest.raises(OsascriptError, match="activating WhatsApp failed"):
+        await osascript_send.press_return()
+
+    assert scripts == ['tell application "WhatsApp" to activate'], (
+        "must not fall through to the keystroke when activation failed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_press_return_maps_1743_on_activate_to_automation_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-6: a revoked Automation grant surfaces structurally, not as a traceback."""
+
+    async def fake(_script: str, timeout: float = 3.0) -> OsascriptResult:
+        return OsascriptResult(exit_code=1, stdout="", stderr="", error_code=-1743)
+
+    monkeypatch.setattr(osascript_send, "run_osascript", fake)
+    monkeypatch.setattr(osascript_send, "_ACTIVATE_SETTLE_S", 0)
+
+    with pytest.raises(AutomationRevoked, match="before activate"):
+        await osascript_send.press_return()
