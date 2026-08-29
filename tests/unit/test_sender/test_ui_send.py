@@ -19,6 +19,7 @@ Covers:
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -308,3 +309,83 @@ async def test_send_text_unsupported_kind_raises_not_implemented(
                 recipient_phone_e164=None,
                 kind=unsupported,
             )
+
+
+# ---------------------------------------------------------------------------
+# send_image — pasteboard route
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_image_asserts_chat_before_pasting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The D-03 assert must precede the paste.
+
+    It cannot sit immediately before the Return the way the text path's does:
+    pasting raises WhatsApp's media-preview sheet and AXFocusedWindow then
+    resolves to a sheet carrying no chat header. So the ordering pinned here
+    IS the guarantee — assert, then paste, then send.
+    """
+    order: list[str] = []
+
+    def fake_clipboard(image_path: str) -> Path:
+        order.append("clipboard")
+        return Path(image_path)
+
+    monkeypatch.setattr(ui_send, "put_image_on_clipboard", fake_clipboard)
+
+    async def fake_deeplink(_phone: str, _body: str) -> None:
+        order.append("deeplink")
+
+    monkeypatch.setattr(ui_send, "send_deeplink", fake_deeplink)
+    monkeypatch.setattr(
+        ui_send, "assert_focused_chat_matches", lambda _n: order.append("ax_assert")
+    )
+
+    async def fake_paste() -> None:
+        order.append("paste")
+
+    async def fake_return() -> None:
+        order.append("return")
+
+    monkeypatch.setattr(ui_send, "press_paste", fake_paste)
+    monkeypatch.setattr(ui_send, "press_return", fake_return)
+    monkeypatch.setattr(ui_send, "_POST_PASTE_SETTLE_S", 0)
+
+    is_experimental, _started = await ui_send.send_image(
+        1, str(tmp_path / "x.png"), "Nitin Stable Money", "919398920994", "direct"
+    )
+
+    assert is_experimental is False
+    assert order == ["clipboard", "deeplink", "ax_assert", "paste", "return"], order
+
+
+@pytest.mark.asyncio
+async def test_send_image_loads_the_file_before_driving_any_ui(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bad path must fail with nothing opened and the clipboard untouched."""
+    touched: list[str] = []
+
+    async def fake_deeplink(_phone: str, _body: str) -> None:
+        touched.append("deeplink")
+
+    monkeypatch.setattr(ui_send, "send_deeplink", fake_deeplink)
+
+    with pytest.raises(FileNotFoundError):
+        await ui_send.send_image(
+            1, str(tmp_path / "missing.png"), "Nitin Stable Money", "919398920994", "direct"
+        )
+
+    assert touched == [], "no UI may be driven when the image cannot be loaded"
+
+
+@pytest.mark.asyncio
+async def test_send_image_rejects_unsupported_chat_kind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ui_send, "put_image_on_clipboard", lambda p: Path(p))
+
+    with pytest.raises(NotImplementedError, match="does not support chat kind"):
+        await ui_send.send_image(1, str(tmp_path / "x.png"), "Somebody", None, "broadcast")

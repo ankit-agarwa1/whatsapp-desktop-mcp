@@ -102,7 +102,8 @@ from whatsapp_desktop_mcp.sender.ax_assert import (
     assert_focused_chat_matches,
 )
 from whatsapp_desktop_mcp.sender.deeplink import send_deeplink
-from whatsapp_desktop_mcp.sender.osascript_send import press_return, type_string
+from whatsapp_desktop_mcp.sender.osascript_send import press_paste, press_return, type_string
+from whatsapp_desktop_mcp.sender.pasteboard import put_image_on_clipboard
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,9 @@ _POST_SHORTCUT_SETTLE_S = 0.15  # post Cmd-F sidebar-search focus settle
 _POST_SEARCH_TYPE_SETTLE_S = 0.4  # let WA render search results
 _POST_CHAT_OPEN_SETTLE_S = 0.4  # let WA render chat pane after selecting result
 _POST_BODY_TYPE_SETTLE_S = 0.15  # post body keystroke settle before Return
+
+# Media-preview sheet animation after a paste, before Return will send it.
+_POST_PASTE_SETTLE_S = 0.6
 
 
 async def send_text(
@@ -226,7 +230,7 @@ async def send_text(
     )
 
 
-async def send_group_via_search(chat_name: str, body: str) -> None:
+async def _open_group_chat_via_search(chat_name: str) -> None:
     """Drive the group-send search-and-click fallback (D-02 / Pattern 4).
 
     Sequence (verbatim from 02-RESEARCH.md §"Pattern 4" with SP-1
@@ -302,6 +306,11 @@ async def send_group_via_search(chat_name: str, body: str) -> None:
     # orchestration layer).
     assert_focused_chat_matches(chat_name)
 
+
+async def send_group_via_search(chat_name: str, body: str) -> None:
+    """Group text send: open the chat by search, then type + send the body."""
+    await _open_group_chat_via_search(chat_name)
+
     # Step 7 — type the body. Non-BMP rejected up-front by
     # type_string per P12.
     await type_string(body)
@@ -309,3 +318,67 @@ async def send_group_via_search(chat_name: str, body: str) -> None:
 
     # Step 8 — Return sends.
     await press_return()
+
+
+async def send_image(
+    chat_id: int,
+    image_path: str,
+    chat_name: str,
+    recipient_phone_e164: str | None,
+    kind: str,
+) -> tuple[bool, float]:
+    """Send one image file to ``chat_id`` via the pasteboard.
+
+    The ``whatsapp://send`` URL scheme carries text ONLY, so an image goes
+    the way a human sends one: onto the pasteboard, pasted into the compose
+    box, then Return.
+
+    **Narrower guarantee than :func:`send_text`, deliberately.** In the text
+    path the D-03 AX assert runs immediately before the Return that sends.
+    Here it cannot: pasting raises WhatsApp's media-preview sheet, and
+    ``AXFocusedWindow`` then resolves to that sheet, which carries no chat
+    header (verified live on 26.31.23 — a 4-node subtree where the settled
+    window walks ~84). So the assert runs immediately before the PASTE, and
+    the window between verification and send is one paste plus one settle
+    rather than zero. WhatsApp is frontmost and holding focus throughout,
+    which is what makes that window narrow enough to accept.
+
+    No caption support in v1: the preview sheet owns the caption field once
+    it is up, and driving it blind is exactly the kind of guess this module
+    has been bitten by. Send the image, then send text separately.
+
+    Returns ``(is_experimental, send_started_unix)`` like :func:`send_text`.
+    """
+    send_started_unix = time.time()
+    # Load the image BEFORE any UI is driven: a missing or undecodable file
+    # should fail with nothing touched, not with a chat open and the user's
+    # pasteboard already clobbered.
+    resolved = put_image_on_clipboard(image_path)
+
+    if kind == "direct":
+        if recipient_phone_e164 is None:
+            raise ValueError(f"1:1 send requires phone_e164; got chat_id={chat_id} kind={kind}")
+        # Empty body: the deep-link is used only to OPEN the chat here.
+        await send_deeplink(recipient_phone_e164, "")
+        assert_focused_chat_matches(chat_name)
+        is_experimental = False
+    elif kind == "group":
+        await _open_group_chat_via_search(chat_name)
+        is_experimental = True
+    else:
+        raise NotImplementedError(
+            f"send_image does not support chat kind={kind!r}; supported: 'direct', 'group'"
+        )
+
+    await press_paste()
+    # The media-preview sheet animates in; Return before it is up either does
+    # nothing or sends an empty message.
+    await asyncio.sleep(_POST_PASTE_SETTLE_S)
+    await press_return()
+    logger.debug(
+        "send_image: chat_id=%d image=%s sent (is_experimental=%s)",
+        chat_id,
+        resolved.name,
+        is_experimental,
+    )
+    return (is_experimental, send_started_unix)

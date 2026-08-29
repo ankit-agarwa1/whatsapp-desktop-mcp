@@ -269,3 +269,44 @@ async def test_press_return_maps_1743_on_activate_to_automation_revoked(
 
     with pytest.raises(AutomationRevoked, match="before activate"):
         await osascript_send.press_return()
+
+
+@pytest.mark.asyncio
+async def test_press_paste_activates_whatsapp_then_sends_cmd_v(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cmd-V must reach WhatsApp, not whatever app the user has in front."""
+    scripts: list[str] = []
+
+    async def fake(script: str, timeout: float = 3.0) -> OsascriptResult:
+        scripts.append(script)
+        return OsascriptResult(exit_code=0, stdout="", stderr="", error_code=None)
+
+    monkeypatch.setattr(osascript_send, "run_osascript", fake)
+    monkeypatch.setattr(osascript_send, "_ACTIVATE_SETTLE_S", 0)
+
+    await osascript_send.press_paste()
+
+    assert len(scripts) == 2, f"expected activate + paste, got {scripts}"
+    assert 'tell application "WhatsApp" to activate' == scripts[0]
+    assert 'keystroke "v" using command down' in scripts[1]
+
+
+@pytest.mark.asyncio
+async def test_press_paste_does_not_keystroke_when_activate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same guard as press_return: never fall through into an unknown app."""
+    scripts: list[str] = []
+
+    async def fake(script: str, timeout: float = 3.0) -> OsascriptResult:
+        scripts.append(script)
+        return OsascriptResult(exit_code=1, stdout="", stderr="boom", error_code=None)
+
+    monkeypatch.setattr(osascript_send, "run_osascript", fake)
+    monkeypatch.setattr(osascript_send, "_ACTIVATE_SETTLE_S", 0)
+
+    with pytest.raises(OsascriptError, match="activating WhatsApp failed"):
+        await osascript_send.press_paste()
+
+    assert scripts == ['tell application "WhatsApp" to activate']
