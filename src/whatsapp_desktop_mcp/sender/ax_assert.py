@@ -85,7 +85,7 @@ identifier), or "New Chat" (``NavigationBar_NewChatButton``) — all
 verified live on 26.31.23, pid 948.
 
 **SP-5 locked role widening for the group-fallback first-result
-preflight:** ``_assert_first_search_result_matches`` calls the same
+preflight:** ``open_first_search_result`` calls the same
 DFS with the widened set ``{"AXHeading", "AXButton"}`` because the
 first clickable sidebar result is an ``AXButton`` whose
 ``AXDescription`` carries the chat display name (with leading U+200E).
@@ -410,29 +410,37 @@ def assert_focused_chat_matches(expected_chat_name: str) -> None:
     )
 
 
-def _assert_first_search_result_matches(chat_name: str) -> None:
-    """Verify the topmost sidebar-search result matches the expected chat name.
+def open_first_search_result(chat_name: str) -> None:
+    """Verify the topmost sidebar-search result matches, then open it.
 
     Companion preflight for Plan 02-03's group-send fallback (CONTEXT.md
-    D-02 search-and-click flow). The orchestrator types the chat name
-    into the sidebar search field, waits for results to render, and
-    THEN calls this function before pressing Return to open the chat —
-    so the wrong-chat protection covers the group-fallback path the
-    same way :func:`assert_focused_chat_matches` covers the 1:1
-    deep-link path.
+    D-02 search-and-click flow). The orchestrator types the chat name into
+    the sidebar search field, waits for results to render, and THEN calls
+    this — so the wrong-chat protection covers the group-fallback path the
+    same way :func:`assert_focused_chat_matches` covers the 1:1 deep-link
+    path.
 
-    Algorithm matches :func:`assert_focused_chat_matches` with two
-    differences:
+    Opens the chat by firing ``AXPress`` on the matched row, NOT by pressing
+    Return. Verified live on 26.31.23: with the search field focused and
+    ``reminder`` the topmost result, Return left the previously-open chat in
+    place and the send aborted on the header assert. AXPress on the row
+    opened it in ~0.1s.
 
-    1. The role filter is widened to ``{"AXHeading", "AXButton"}``
-       (SP-5 locked: sidebar result rows are ``AXButton`` with the chat
-       display name in ``AXDescription``; the ``AXHeading`` siblings in
-       the sidebar — section labels like "Discussions", date separators
-       — are harmless because the substring match accommodates them
-       cleanly).
-    2. The error message references the search-result context, not
-       the chat header context, so audit-log readers can distinguish
-       which preflight failed.
+    Pressing the row is also strictly safer than Return. Return activates
+    whatever WhatsApp considers current, which is not necessarily the row
+    that was matched; AXPress acts on the exact node this function verified.
+
+    The role filter is widened to ``{"AXHeading", "AXButton"}`` (SP-5
+    locked): result rows are ``AXButton`` carrying the chat display name in
+    ``AXDescription``, and the ``AXHeading`` siblings — section labels, date
+    separators — are harmless under substring matching. Only an ``AXButton``
+    is ever pressed; headings can satisfy the match for diagnostics but are
+    not openable rows.
+
+    Raises:
+        AccessibilityAPIUnavailable: pyobjc runtime imports failed (D-06).
+        ChatHeaderMismatch: WhatsApp is not running, the focused window could
+            not be read, or no sidebar row matched ``chat_name``.
     """
     if not _PYOBJC_AVAILABLE:
         raise AccessibilityAPIUnavailable(
@@ -457,22 +465,55 @@ def _assert_first_search_result_matches(chat_name: str) -> None:
             "and retry"
         )
 
-    labels = _walk_for_heading(window, roles=_SIDEBAR_RESULT_ROLES)
+    row, labels = _find_matching_result_row(window, chat_name)
+    if row is None:
+        raise ChatHeaderMismatch(
+            f"Sidebar search topmost result does not match expected chat_name="
+            f"{chat_name!r}; observed sidebar label(s) (stripped) = "
+            f"{[_strip_bidi(label) for label in labels]}"
+        )
+
+    logger.debug("open_first_search_result: pressing matched row for %r", chat_name)
+    AXUIElementPerformAction(row, "AXPress")
+
+
+def _find_matching_result_row(elem: Any, chat_name: str) -> tuple[Any | None, list[str]]:
+    """Bounded BFS for the first pressable sidebar row matching ``chat_name``.
+
+    Returns ``(row, labels)`` — ``row`` is the first ``AXButton`` in
+    breadth-first order whose ``AXDescription`` / ``AXTitle`` contains the
+    expected name after bidi-strip + casefold, or ``None`` if none did.
+    ``labels`` is every label seen under ``_SIDEBAR_RESULT_ROLES``, for the
+    caller's diagnostic message.
+
+    BFS, so a deep message-list subtree cannot bury the shallow sidebar —
+    the same traversal fix as :func:`_walk_for_heading`.
+    """
     expected = _strip_bidi(chat_name).casefold()
+    labels: list[str] = []
+    queue: list[Any] = [elem]
+    visited = 0
+    row: Any | None = None
 
-    for label in labels:
-        if expected in _strip_bidi(label).casefold():
-            logger.debug(
-                "_assert_first_search_result_matches: matched expected=%r in sidebar",
-                chat_name,
-            )
-            return
+    while queue and visited < _MAX_WALK_NODES:
+        node = queue.pop(0)
+        visited += 1
 
-    raise ChatHeaderMismatch(
-        f"Sidebar search topmost result does not match expected chat_name="
-        f"{chat_name!r}; observed sidebar label(s) (stripped) = "
-        f"{[_strip_bidi(label) for label in labels]}"
-    )
+        role_err, role = AXUIElementCopyAttributeValue(node, kAXRoleAttribute, None)
+        if role_err == 0 and role in _SIDEBAR_RESULT_ROLES:
+            for attr in (kAXDescriptionAttribute, kAXTitleAttribute):
+                label_err, label = AXUIElementCopyAttributeValue(node, attr, None)
+                if label_err != 0 or not isinstance(label, str) or not label:
+                    continue
+                labels.append(label)
+                if row is None and role == "AXButton" and expected in _strip_bidi(label).casefold():
+                    row = node
+
+        kids_err, kids = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, None)
+        if kids_err == 0 and kids:
+            queue.extend(kids)
+
+    return row, labels
 
 
 def _find_by_identifier(elem: Any, identifier: str) -> Any | None:
