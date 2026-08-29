@@ -131,10 +131,9 @@ try:
     from ApplicationServices import (  # type: ignore[import-untyped]
         AXUIElementCopyAttributeValue,
         AXUIElementCreateApplication,
-        AXUIElementSetAttributeValue,
+        AXUIElementPerformAction,
         kAXChildrenAttribute,
         kAXDescriptionAttribute,
-        kAXFocusedAttribute,
         kAXFocusedUIElementAttribute,
         kAXFocusedWindowAttribute,
         kAXIdentifierAttribute,
@@ -499,7 +498,7 @@ def focus_composer() -> None:
     The 1:1 deeplink path does not need this: ``whatsapp://send`` focuses the
     composer itself.
 
-    Sets ``AXFocused`` on the ``ChatBar_ComposerTextView`` node, then re-reads
+    Fires ``AXPress`` on the ``ChatBar_ComposerTextView`` node, then re-reads
     ``AXFocusedUIElement`` until it reports that same identifier. Raises
     rather than returning a boolean: every caller must abort the send, and a
     silently-ignored False would type the body into the search field.
@@ -540,7 +539,11 @@ def focus_composer() -> None:
             "composer"
         )
 
-    AXUIElementSetAttributeValue(composer, kAXFocusedAttribute, True)
+    # AXPress, NOT AXFocused. WhatsApp Catalyst reports AXFocused as settable
+    # and returns success (rc=0) for the write, then ignores it — verified
+    # live on 26.31.23: focus stayed on the search field for a full 2s of
+    # polling. AXPress on the same node lands focus in ~0.1s.
+    AXUIElementPerformAction(composer, "AXPress")
 
     for attempt in range(_FOCUS_SETTLE_ATTEMPTS):
         if attempt:
@@ -554,7 +557,7 @@ def focus_composer() -> None:
             return
 
     raise ComposerNotFocused(
-        f"set AXFocused on {_COMPOSER_IDENTIFIER!r} but AXFocusedUIElement never "
+        f"pressed {_COMPOSER_IDENTIFIER!r} but AXFocusedUIElement never "
         f"reported it within {_FOCUS_SETTLE_ATTEMPTS * _FOCUS_SETTLE_INTERVAL_S:.2f}s; "
         "aborting rather than typing into whatever holds focus"
     )

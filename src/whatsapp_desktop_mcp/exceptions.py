@@ -159,9 +159,12 @@ class ComposerNotFocused(WhatsAppMCPError):
     body ``type_string``, or the image ``Cmd-V`` — then lands in the search
     field instead of the composer and the send silently does nothing.
 
-    The sender moves focus explicitly via ``AXFocused`` on the composer
+    The sender moves focus explicitly by firing ``AXPress`` on the composer
     (``ChatBar_ComposerTextView``) and re-reads ``AXFocusedUIElement`` to
-    confirm. This exception means that confirmation failed, so the send is
+    confirm. ``AXFocused`` is NOT used: Catalyst advertises it as settable
+    and returns success for the write, then ignores it.
+
+    This exception means that confirmation failed, so the send is
     aborted BEFORE any keystroke fires rather than typed into the wrong
     field.
     """
