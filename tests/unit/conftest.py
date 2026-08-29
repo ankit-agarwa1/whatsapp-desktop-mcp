@@ -784,9 +784,9 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
     ``_PYOBJC_AVAILABLE`` to True (so the import-fallback branch is
     skipped) and monkey-patches:
 
-    - ``NSWorkspace.sharedWorkspace().runningApplications()`` returning a
-      list whose elements expose ``bundleIdentifier()`` /
-      ``processIdentifier()`` — the latter is the resolved WhatsApp PID.
+    - ``NSRunningApplication.runningApplicationsWithBundleIdentifier_``
+      returning a list whose elements expose ``processIdentifier()`` — the
+      resolved WhatsApp PID.
     - ``AXUIElementCreateApplication`` returning a sentinel object.
     - ``AXUIElementCopyAttributeValue(elem, attr, None)`` returning a
       2-tuple (err, value) per SP-4. The fake routes by ``attr``:
@@ -805,7 +805,7 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
     # _PYOBJC_AVAILABLE may have been set False at import time on non-mac
     # CI; force True so the public callables exercise the AX-walk path.
     # pyobjc ships in the optional [send] extra. Without it the AX symbols this
-    # fixture fakes (NSWorkspace, AXUIElementCreateApplication, the kAX*
+    # fixture fakes (NSRunningApplication, AXUIElementCreateApplication, the kAX*
     # constants) do not exist on the module at all, so there is nothing
     # meaningful to patch. Skip rather than fake a surface that is absent — the
     # base install genuinely has no AX path, and CI's [dev,send] matrix covers
@@ -828,9 +828,8 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
     k_title = getattr(ax_assert, "kAXTitleAttribute", None)
     k_identifier = getattr(ax_assert, "kAXIdentifierAttribute", None)
 
-    # NSWorkspace.sharedWorkspace().runningApplications() — return a
-    # single fake app whose bundleIdentifier matches WhatsApp.app when
-    # ``whatsapp_running`` is True, else an empty list.
+    # runningApplicationsWithBundleIdentifier_ — return a single fake app
+    # when ``whatsapp_running`` is True, else an empty list.
     class _FakeApp:
         def bundleIdentifier(self) -> str:  # noqa: N802 — match pyobjc name
             return "net.whatsapp.WhatsApp"
@@ -838,16 +837,16 @@ def mock_pyobjc(monkeypatch: pytest.MonkeyPatch) -> _AXFake:
         def processIdentifier(self) -> int:  # noqa: N802
             return 12345
 
-    class _FakeWorkspace:
-        def runningApplications(self) -> list[_FakeApp]:  # noqa: N802
+    class _NSRunningApplicationShim:
+        @staticmethod
+        def runningApplicationsWithBundleIdentifier_(  # noqa: N802
+            bundle_id: str,
+        ) -> list[_FakeApp]:
+            if bundle_id != "net.whatsapp.WhatsApp":
+                return []
             return [_FakeApp()] if fake.whatsapp_running else []
 
-    class _NSWorkspaceShim:
-        @staticmethod
-        def sharedWorkspace() -> _FakeWorkspace:  # noqa: N802
-            return _FakeWorkspace()
-
-    monkeypatch.setattr(ax_assert, "NSWorkspace", _NSWorkspaceShim)
+    monkeypatch.setattr(ax_assert, "NSRunningApplication", _NSRunningApplicationShim)
 
     # AXUIElementCreateApplication(pid) → sentinel element.
     monkeypatch.setattr(

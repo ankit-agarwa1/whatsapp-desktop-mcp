@@ -140,7 +140,7 @@ try:
         kAXRoleAttribute,
         kAXTitleAttribute,
     )
-    from Cocoa import NSWorkspace  # type: ignore[import-untyped]
+    from Cocoa import NSRunningApplication  # type: ignore[import-untyped]
 
     _PYOBJC_AVAILABLE = True
 except ImportError:
@@ -229,7 +229,19 @@ def _strip_bidi(s: str) -> str:
 
 
 def _resolve_whatsapp_pid() -> int | None:
-    """Resolve WhatsApp Desktop's PID via ``NSWorkspace.runningApplications``.
+    """Resolve WhatsApp Desktop's PID, queried live on every call.
+
+    Uses ``NSRunningApplication.runningApplicationsWithBundleIdentifier_``,
+    NOT ``NSWorkspace.sharedWorkspace().runningApplications()``. The latter
+    is maintained by workspace notifications delivered on the main run loop;
+    this server never spins one, so the list is a snapshot frozen at first
+    access. A server that starts while WhatsApp is closed then stays blind to
+    it forever, and every send fails with "WhatsApp.app is not running" while
+    WhatsApp sits in the Dock. Verified live — after launching a fresh app:
+
+        NSWorkspace.runningApplications()          -> [9213]   (stale)
+        runningApplicationsWithBundleIdentifier_   -> [38839]
+        pgrep                                      -> 38839
 
     Returns ``None`` when:
       * pyobjc is not available (``_PYOBJC_AVAILABLE == False``), OR
@@ -241,10 +253,9 @@ def _resolve_whatsapp_pid() -> int | None:
     """
     if not _PYOBJC_AVAILABLE:
         return None
-    workspace = NSWorkspace.sharedWorkspace()
-    for app in workspace.runningApplications():
-        if app.bundleIdentifier() == _WHATSAPP_BUNDLE_ID:
-            return int(app.processIdentifier())
+    running = NSRunningApplication.runningApplicationsWithBundleIdentifier_(_WHATSAPP_BUNDLE_ID)
+    for app in running or []:
+        return int(app.processIdentifier())
     return None
 
 
@@ -318,7 +329,7 @@ def assert_focused_chat_matches(expected_chat_name: str) -> None:
 
     1. If pyobjc is unavailable (D-06 fallback), raise
        :class:`AccessibilityAPIUnavailable`.
-    2. Resolve WhatsApp.app's PID via NSWorkspace. If WhatsApp is not
+    2. Resolve WhatsApp.app's PID (queried live). If WhatsApp is not
        running, raise :class:`ChatHeaderMismatch`.
     3. Create an AX element for the application, read its
        ``AXFocusedWindow`` attribute. On failure, raise
