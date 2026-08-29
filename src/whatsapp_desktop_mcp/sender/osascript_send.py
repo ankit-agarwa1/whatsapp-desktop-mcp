@@ -76,6 +76,39 @@ _BMP_MAX = 0xFFFF
 _ACTIVATE_SETTLE_S = 0.15
 
 
+async def _activate_whatsapp(timeout: float) -> None:
+    """Bring WhatsApp frontmost and wait for it to actually become key.
+
+    ``System Events`` delivers keystrokes to the FRONTMOST application, and
+    the deep-link that opens the chat is spawned with ``open -g``, which
+    deliberately leaves WhatsApp in the background (deeplink.py: "surfaces
+    into the AX tree but does NOT become frontmost"). Every keystroke helper
+    in this module must therefore take focus first, or its keystroke lands in
+    whichever app the user happens to have in front.
+
+    Activation is asynchronous — AppleScript returns before the app is key,
+    and a keystroke fired into that gap still hits the old frontmost app — so
+    the settle sleep is load-bearing, not defensive.
+    """
+    activate = await run_osascript(
+        'tell application "WhatsApp" to activate',
+        timeout=timeout,
+    )
+    if activate.error_code == _ERR_NOT_PERMITTED:
+        raise AutomationRevoked(
+            "Automation TCC revoked before activate; grant Automation in "
+            "System Settings → Privacy & Security → Automation"
+        )
+    if activate.exit_code != 0:
+        raise OsascriptError(
+            f"activating WhatsApp failed: exit={activate.exit_code} stderr={activate.stderr!r}"
+        )
+    # Activation is asynchronous in AppleScript: the call returns before the
+    # app is actually key, and a keystroke fired into that gap goes to the
+    # OLD frontmost app — the exact bug this activate exists to fix.
+    await asyncio.sleep(_ACTIVATE_SETTLE_S)
+
+
 async def press_return(timeout: float = 3.0) -> None:
     """Fire a ``Return`` keystroke at the focused window.
 
@@ -100,23 +133,7 @@ async def press_return(timeout: float = 3.0) -> None:
     #
     # The AX preflight in ui_send has already run at this point, so the chat
     # identity is confirmed BEFORE we take focus.
-    activate = await run_osascript(
-        'tell application "WhatsApp" to activate',
-        timeout=timeout,
-    )
-    if activate.error_code == _ERR_NOT_PERMITTED:
-        raise AutomationRevoked(
-            "Automation TCC revoked before activate; grant Automation in "
-            "System Settings → Privacy & Security → Automation"
-        )
-    if activate.exit_code != 0:
-        raise OsascriptError(
-            f"activating WhatsApp failed: exit={activate.exit_code} stderr={activate.stderr!r}"
-        )
-    # Activation is asynchronous in AppleScript: the call returns before the
-    # app is actually key, and a keystroke fired into that gap goes to the
-    # OLD frontmost app — the exact bug this activate exists to fix.
-    await asyncio.sleep(_ACTIVATE_SETTLE_S)
+    await _activate_whatsapp(timeout)
 
     result = await run_osascript(
         'tell application "System Events" to keystroke return',
@@ -177,4 +194,31 @@ async def type_string(text: str, timeout: float = 3.0) -> None:
         )
     raise OsascriptError(
         f"keystroke <string> failed: exit={result.exit_code} stderr={result.stderr!r}"
+    )
+
+
+async def press_paste(timeout: float = 3.0) -> None:
+    """Fire ``Cmd-V`` at WhatsApp to paste the pasteboard into the compose box.
+
+    Used by the image-send path: the ``whatsapp://send`` URL scheme carries
+    text ONLY, so an image reaches a chat the same way a human sends one —
+    on the pasteboard, pasted in, then sent.
+
+    Activates WhatsApp first for exactly the reason :func:`press_return` does.
+    """
+    await _activate_whatsapp(timeout)
+
+    result = await run_osascript(
+        'tell application "System Events" to keystroke "v" using command down',
+        timeout=timeout,
+    )
+    if result.exit_code == 0:
+        return
+    if result.error_code == _ERR_NOT_PERMITTED:
+        raise AutomationRevoked(
+            "Automation TCC revoked mid-paste; grant Automation in "
+            "System Settings → Privacy & Security → Automation"
+        )
+    raise OsascriptError(
+        f"paste keystroke failed: exit={result.exit_code} stderr={result.stderr!r}"
     )

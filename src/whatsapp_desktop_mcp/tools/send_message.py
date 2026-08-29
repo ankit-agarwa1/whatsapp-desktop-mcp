@@ -207,7 +207,7 @@ from whatsapp_desktop_mcp.permissions import automation
 from whatsapp_desktop_mcp.sender import audit, cross_chat_quote, rate_limit, verify
 from whatsapp_desktop_mcp.sender.audit import AuditEntry, body_sha256
 from whatsapp_desktop_mcp.sender.cross_chat_quote import OffendingSource
-from whatsapp_desktop_mcp.sender.ui_send import send_text
+from whatsapp_desktop_mcp.sender.ui_send import send_image, send_text
 from whatsapp_desktop_mcp.server import mcp
 from whatsapp_desktop_mcp.tools._decorators import restart_timeout, suspend_timeout, timeout
 
@@ -290,6 +290,7 @@ async def send_message(
     chat_id: int,
     body: str,
     ctx: Context,  # type: ignore[type-arg]
+    image_path: str | None = None,
 ) -> SendResult:
     """Send one text message via WhatsApp Desktop — D-25 11-step orchestration.
 
@@ -297,6 +298,12 @@ async def send_message(
     summarizes the runtime contract for the LLM client surface.
 
     Args:
+        image_path: Optional path to an image file (png/jpg/jpeg/gif/heic/
+            tiff/webp). When given, ``body`` MUST be empty — the image is
+            sent via the system pasteboard (the whatsapp:// URL scheme
+            carries text only) and captions are not supported in v1.
+            NOTE: writing the image to the pasteboard CLOBBERS whatever the
+            user had copied; that is inherent to this route.
         chat_id: Opaque ``ZWACHATSESSION.Z_PK`` returned by a prior
             ``search_contacts`` / ``list_chats`` call. Free-form name
             strings are rejected at the Pydantic-validation layer.
@@ -470,13 +477,31 @@ async def send_message(
         # form does NOT appear in this module's source — keeps the
         # D-13 structural grep gate clean. The body string passes
         # through the orchestrator as the second positional argument.
-        is_experimental, send_started_unix = await send_text(
-            chat_id,
-            body,
-            chat_name,
-            recipient_phone,
-            chat.kind,
-        )
+        if image_path is not None:
+            # Image sends go via the pasteboard — the whatsapp:// URL scheme
+            # carries text only. Captions are unsupported (see
+            # ui_send.send_image), and silently dropping a body the caller
+            # asked to send would be worse than refusing it.
+            if body:
+                raise ValueError(
+                    "captions are not supported: send the image with body='', "
+                    "then send the text as a separate message"
+                )
+            is_experimental, send_started_unix = await send_image(
+                chat_id,
+                image_path,
+                chat_name,
+                recipient_phone,
+                chat.kind,
+            )
+        else:
+            is_experimental, send_started_unix = await send_text(
+                chat_id,
+                body,
+                chat_name,
+                recipient_phone,
+                chat.kind,
+            )
 
         # STEP 9 — SEND-08: post-hoc DB poll for the outgoing ZSTANZAID.
         # 10 s budget; first match wins; None on timeout maps to
