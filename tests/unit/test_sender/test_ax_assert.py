@@ -591,3 +591,48 @@ def test_find_by_identifier_is_breadth_first_and_bounded(
 
     assert ax_assert._find_by_identifier(root, ax_assert._COMPOSER_IDENTIFIER) is composer
     assert ax_assert._find_by_identifier(root, "not-present") is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_whatsapp_pid — must query live, never a cached list
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_whatsapp_pid_queries_live_on_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WhatsApp started AFTER the server must still be found.
+
+    Verified-live regression: ``NSWorkspace.runningApplications()`` is
+    maintained by run-loop notifications this server never pumps, so it
+    froze at first access. The server was started while WhatsApp was closed
+    and then reported "WhatsApp.app is not running" for the rest of its life
+    while WhatsApp sat in the Dock.
+    """
+    monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", True)
+
+    class _App:
+        def processIdentifier(self) -> int:  # noqa: N802 — match pyobjc name
+            return 38497
+
+    launched: list[bool] = [False]
+    queries: list[str] = []
+
+    class _Shim:
+        @staticmethod
+        def runningApplicationsWithBundleIdentifier_(bundle_id: str) -> list[_App]:  # noqa: N802
+            queries.append(bundle_id)
+            return [_App()] if launched[0] else []
+
+    monkeypatch.setattr(ax_assert, "NSRunningApplication", _Shim)
+
+    assert ax_assert._resolve_whatsapp_pid() is None  # not running yet
+    launched[0] = True
+    assert ax_assert._resolve_whatsapp_pid() == 38497  # started since — found
+
+    assert queries == [ax_assert._WHATSAPP_BUNDLE_ID] * 2, "must re-query, not cache"
+
+
+def test_ax_assert_does_not_use_nsworkspace() -> None:
+    """Pin the API choice: NSWorkspace's list is stale in a run-loop-less process."""
+    assert not hasattr(ax_assert, "NSWorkspace")
