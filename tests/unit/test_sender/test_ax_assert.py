@@ -24,9 +24,11 @@ from __future__ import annotations
 import pytest
 from ApplicationServices import (
     kAXChildrenAttribute,
+    kAXDescriptionAttribute,
     kAXFocusedUIElementAttribute,
     kAXFocusedWindowAttribute,
     kAXIdentifierAttribute,
+    kAXRoleAttribute,
 )
 
 from whatsapp_desktop_mcp.exceptions import (
@@ -334,26 +336,89 @@ def test_long_message_backlog_does_not_bury_the_chat_header(
     ax_assert.assert_focused_chat_matches("Nitin Stable Money")
 
 
-def test_assert_first_search_result_matches_uses_widened_role_set(
-    mock_pyobjc: object,
-) -> None:
-    """``_assert_first_search_result_matches`` exposes the SP-5 widened role filter.
+def _sidebar_tree(monkeypatch: pytest.MonkeyPatch, rows: list[tuple[str, str]]) -> list[object]:
+    """Build a fake sidebar of ``(role, label)`` rows; return the press log.
 
-    The companion preflight (for the group-fallback sidebar-search path)
-    uses ``{"AXHeading", "AXButton"}`` so the topmost search result row
-    (which is an AXButton with the chat display name in AXDescription)
-    matches. The mock_pyobjc fixture's walk yields AXHeading by default;
-    if we feed in the expected chat name, the matching code path returns
-    cleanly without raising.
+    The press log records the node that ``AXPress`` was fired on, so a test
+    can assert WHICH row was opened rather than merely that something was.
     """
-    from tests.unit.conftest import _AXFake
 
-    fake: _AXFake = mock_pyobjc  # type: ignore[assignment]
-    fake.walk_returns = ["‎Alice Smith"]
+    class Node:
+        def __init__(self, role: str, label: str) -> None:
+            self.role = role
+            self.label = label
 
-    # Should NOT raise — the AX preflight on the sidebar's topmost
-    # result matches.
-    ax_assert._assert_first_search_result_matches("Alice Smith")
+    nodes = [Node(role, label) for role, label in rows]
+    root = Node("AXWindow", "")
+    pressed: list[object] = []
+
+    def fake_copy(elem: object, attr: object, _none: object) -> tuple[int, object]:
+        if attr == kAXFocusedWindowAttribute:
+            return (0, root)
+        if attr == kAXChildrenAttribute:
+            return (0, nodes if elem is root else [])
+        if attr == kAXRoleAttribute:
+            return (0, getattr(elem, "role", "AXWindow"))
+        if attr == kAXDescriptionAttribute:
+            return (0, getattr(elem, "label", ""))
+        return (-1, None)
+
+    monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", True)
+    monkeypatch.setattr(ax_assert, "_resolve_whatsapp_pid", lambda: 948)
+    monkeypatch.setattr(ax_assert, "AXUIElementCreateApplication", lambda _pid: object())
+    monkeypatch.setattr(ax_assert, "AXUIElementCopyAttributeValue", fake_copy)
+
+    def fake_press(elem: object, _action: str) -> int:
+        pressed.append(elem)
+        return 0
+
+    monkeypatch.setattr(ax_assert, "AXUIElementPerformAction", fake_press)
+    ax_assert._sidebar_nodes_for_test = nodes  # type: ignore[attr-defined]
+    return pressed
+
+
+def test_open_first_search_result_presses_the_matched_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row that was verified is the row that gets opened.
+
+    Verified-live regression: with the search field focused and the
+    expected chat the topmost result, Return did NOT select it — the
+    previously-open chat stayed and the send aborted on the header assert.
+    """
+    pressed = _sidebar_tree(
+        monkeypatch,
+        [("AXHeading", "\u200eChats"), ("AXButton", "reminder"), ("AXButton", "reminders club")],
+    )
+
+    ax_assert.open_first_search_result("reminder")
+
+    nodes = ax_assert._sidebar_nodes_for_test  # type: ignore[attr-defined]
+    assert pressed == [nodes[1]], "must press the first matching row, not a later one"
+
+
+def test_open_first_search_result_never_presses_a_heading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headings satisfy the diagnostic label set but are not openable rows."""
+    pressed = _sidebar_tree(monkeypatch, [("AXHeading", "reminder")])
+
+    with pytest.raises(ChatHeaderMismatch, match="topmost result does not match"):
+        ax_assert.open_first_search_result("reminder")
+
+    assert pressed == []
+
+
+def test_open_first_search_result_raises_without_pressing_on_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrong-chat sidebar must abort with the observed labels, pressing nothing."""
+    pressed = _sidebar_tree(monkeypatch, [("AXButton", "Papa"), ("AXButton", "CRED")])
+
+    with pytest.raises(ChatHeaderMismatch, match=r"\['Papa', 'CRED'\]"):
+        ax_assert.open_first_search_result("reminder")
+
+    assert pressed == []
 
 
 def test_assert_focused_chat_matches_error_message_includes_observed_headings(

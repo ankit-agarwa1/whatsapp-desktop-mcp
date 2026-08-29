@@ -9,7 +9,7 @@ Covers:
 * ``send_text(kind="group")`` runs the search-and-click fallback and
   returns ``is_experimental=True``.
 * ``send_text(kind="other")`` → :class:`NotImplementedError`.
-* ``send_group_via_search`` calls ``_assert_first_search_result_matches``
+* ``send_group_via_search`` calls ``open_first_search_result``
   BEFORE the first ``press_return`` on the group path (SP-5 lock).
 * ``send_text`` returns ``send_started_unix`` from BEFORE the subprocess
   fires (so the post-hoc verify ``ZMESSAGEDATE > ?`` predicate
@@ -48,7 +48,7 @@ def _install_call_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         call_log.append("assert_focused_chat_matches")
 
     def fake_ax_first_search(name: str) -> None:
-        call_log.append("_assert_first_search_result_matches")
+        call_log.append("open_first_search_result")
 
     def fake_focus_composer() -> None:
         call_log.append("focus_composer")
@@ -69,7 +69,7 @@ def _install_call_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(ui_send, "send_deeplink", fake_send_deeplink)
     monkeypatch.setattr(ui_send, "assert_focused_chat_matches", fake_ax_focused)
-    monkeypatch.setattr(ui_send, "_assert_first_search_result_matches", fake_ax_first_search)
+    monkeypatch.setattr(ui_send, "open_first_search_result", fake_ax_first_search)
     monkeypatch.setattr(ui_send, "focus_composer", fake_focus_composer)
     monkeypatch.setattr(ui_send, "press_return", fake_press_return)
     monkeypatch.setattr(ui_send, "type_string", fake_type_string)
@@ -222,8 +222,8 @@ async def test_send_text_kind_group_calls_search_and_click_with_ax_before_keystr
     1. run_osascript (activate)
     2. run_osascript (Cmd-F sidebar focus)
     3. type_string (chat name)
-    4. _assert_first_search_result_matches (preflight on topmost result)
-    5. press_return (open chat)
+    4+5. open_first_search_result (preflight on topmost result, then
+         AXPress that row to open the chat — no Return)
     6. assert_focused_chat_matches (preflight on now-focused chat)
     6b. focus_composer (move focus off the sidebar search field)
     7. type_string (body)
@@ -244,30 +244,30 @@ async def test_send_text_kind_group_calls_search_and_click_with_ax_before_keystr
         kind="group",
     )
 
-    # Validate the precise step order. Each AX preflight precedes its
-    # respective press_return on the same code path.
-    idx_first_ax = call_log.index("_assert_first_search_result_matches")
-    idx_first_press = call_log.index("press_return")
-    assert idx_first_ax < idx_first_press
-
+    # Validate the precise step order. The chat is opened by pressing the
+    # verified row, so the ONLY press_return on this path is the send.
+    idx_open = call_log.index("open_first_search_result")
     idx_focused_ax = call_log.index("assert_focused_chat_matches")
-    # The second press_return appears after the focused-chat preflight.
-    second_press_idx = call_log.index("press_return", idx_first_press + 1)
-    assert idx_focused_ax < second_press_idx
+    assert idx_open < idx_focused_ax
 
     # Focus is moved off the sidebar search field after the chat opens and
     # BEFORE the body is typed. Without this the body lands in the search
     # field and no message is sent — the live failure this ordering pins.
     idx_focus = call_log.index("focus_composer")
-    idx_body_type = call_log.index("type_string", idx_first_press)
-    assert idx_focused_ax < idx_focus < idx_body_type
+    idx_body_type = call_log.index("type_string", idx_open)
+    idx_send = call_log.index("press_return")
+    assert idx_focused_ax < idx_focus < idx_body_type < idx_send
+
+    # Exactly one Return on the group path now: the send. A second one would
+    # mean the pre-AXPress "Return selects the result" step came back.
+    assert call_log.count("press_return") == 1
 
 
 @pytest.mark.asyncio
 async def test_send_group_via_search_AX_preflight_on_search_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If ``_assert_first_search_result_matches`` raises, NO press_return fires."""
+    """If ``open_first_search_result`` raises, NO press_return fires."""
     call_log: list[str] = []
 
     async def fake_run_osascript(*_args: object, **_kwargs: object) -> object:
@@ -280,7 +280,7 @@ async def test_send_group_via_search_AX_preflight_on_search_results(
         call_log.append("type_string")
 
     def fake_ax_first_search(name: str) -> None:
-        call_log.append("_assert_first_search_result_matches")
+        call_log.append("open_first_search_result")
         raise ChatHeaderMismatch("topmost result mismatch")
 
     def fake_ax_focused(name: str) -> None:
@@ -291,7 +291,7 @@ async def test_send_group_via_search_AX_preflight_on_search_results(
 
     monkeypatch.setattr(ui_send, "run_osascript", fake_run_osascript)
     monkeypatch.setattr(ui_send, "type_string", fake_type_string)
-    monkeypatch.setattr(ui_send, "_assert_first_search_result_matches", fake_ax_first_search)
+    monkeypatch.setattr(ui_send, "open_first_search_result", fake_ax_first_search)
     monkeypatch.setattr(ui_send, "assert_focused_chat_matches", fake_ax_focused)
     monkeypatch.setattr(ui_send, "press_return", fake_press_return)
 

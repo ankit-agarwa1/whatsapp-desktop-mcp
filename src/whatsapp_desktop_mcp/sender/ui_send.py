@@ -30,7 +30,7 @@ The load-bearing D-03 invariant
 **Every keystroke in this module is preceded — in source-order, inside
 the same execution branch — by a call to**
 :func:`assert_focused_chat_matches` **(or, for the group fallback's
-first preflight,** :func:`_assert_first_search_result_matches` **).**
+first preflight,** :func:`open_first_search_result` **).**
 This is the SEND-04 / P5 wrong-chat-fuzzy-send mitigation. The
 assertions raise :class:`ChatHeaderMismatch` /
 :class:`AccessibilityAPIUnavailable` BEFORE any keystroke fires;
@@ -98,9 +98,9 @@ import time
 
 from whatsapp_desktop_mcp.permissions.osascript import run_osascript
 from whatsapp_desktop_mcp.sender.ax_assert import (
-    _assert_first_search_result_matches,
     assert_focused_chat_matches,
     focus_composer,
+    open_first_search_result,
 )
 from whatsapp_desktop_mcp.sender.deeplink import send_deeplink
 from whatsapp_desktop_mcp.sender.osascript_send import press_paste, press_return, type_string
@@ -246,7 +246,7 @@ async def _open_group_chat_via_search(chat_name: str) -> None:
        :class:`OsascriptError` surfaces rather than a silent
        truncation. Settle 400 ms for WhatsApp to render results.
     4. **AX preflight on the topmost result**:
-       :func:`_assert_first_search_result_matches` walks the focused
+       :func:`open_first_search_result` walks the focused
        window AX tree with the widened ``{"AXHeading", "AXButton"}``
        role set (SP-5 locked) and asserts the topmost result's
        stripped-bidi-casefolded label contains ``chat_name``.
@@ -289,15 +289,16 @@ async def _open_group_chat_via_search(chat_name: str) -> None:
     await type_string(chat_name)
     await asyncio.sleep(_POST_SEARCH_TYPE_SETTLE_S)
 
-    # Step 4 — AX PREFLIGHT on the topmost search result. MUST
-    # raise BEFORE press_return on this branch (SP-5 / load-bearing
-    # P5 mitigation for the group-fallback first-result selection).
-    # This call is the source-order guarantee that no Return-press
-    # selects a wrong chat.
-    _assert_first_search_result_matches(chat_name)
-
-    # Step 5 — Return selects the topmost result, opens the chat.
-    await press_return()
+    # Steps 4+5 — AX PREFLIGHT on the topmost search result, then open it
+    # by pressing that exact row. Verified live on 26.31.23: Return with the
+    # search field focused did NOT select the topmost result — the
+    # previously-open chat stayed put and the send aborted on the step-6
+    # header assert. AXPress on the matched row opens it in ~0.1s.
+    #
+    # Merging the two steps is what makes the guard airtight rather than
+    # merely ordered: the row that gets pressed IS the row that was
+    # verified, so no keystroke can select a different chat in between.
+    open_first_search_result(chat_name)
     await asyncio.sleep(_POST_CHAT_OPEN_SETTLE_S)
 
     # Step 6 — D-03 LOAD-BEARING AX PREFLIGHT on the now-focused
