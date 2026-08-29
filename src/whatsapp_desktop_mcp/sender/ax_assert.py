@@ -118,6 +118,7 @@ from typing import Any
 from whatsapp_desktop_mcp.exceptions import (
     AccessibilityAPIUnavailable,
     ChatHeaderMismatch,
+    ComposerNotFocused,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,8 +131,11 @@ try:
     from ApplicationServices import (  # type: ignore[import-untyped]
         AXUIElementCopyAttributeValue,
         AXUIElementCreateApplication,
+        AXUIElementSetAttributeValue,
         kAXChildrenAttribute,
         kAXDescriptionAttribute,
+        kAXFocusedAttribute,
+        kAXFocusedUIElementAttribute,
         kAXFocusedWindowAttribute,
         kAXIdentifierAttribute,
         kAXRoleAttribute,
@@ -184,6 +188,16 @@ _DEFAULT_HEADING_ROLES: frozenset[str] = frozenset({"AXHeading"})
 # message-body false-positive class SP-3 guards against stays impossible.
 # On 26.16.74 no node carries it and the walk falls back to AXHeading.
 _CHAT_HEADER_IDENTIFIER = "NavigationBar_HeaderViewButton"
+
+# The chat's message-composer text view. Exactly one node in the focused
+# window carries this AXIdentifier (verified live on WhatsApp 26.31.23).
+_COMPOSER_IDENTIFIER = "ChatBar_ComposerTextView"
+
+# Focus is set through the AX API, which WhatsApp applies asynchronously;
+# re-read AXFocusedUIElement until it lands. Same shape as the header
+# settle loop above.
+_FOCUS_SETTLE_ATTEMPTS = 10
+_FOCUS_SETTLE_INTERVAL_S = 0.05
 
 
 # Widened role filter for the sidebar-search first-result preflight. SP-5
@@ -448,4 +462,99 @@ def _assert_first_search_result_matches(chat_name: str) -> None:
         f"Sidebar search topmost result does not match expected chat_name="
         f"{chat_name!r}; observed sidebar label(s) (stripped) = "
         f"{[_strip_bidi(label) for label in labels]}"
+    )
+
+
+def _find_by_identifier(elem: Any, identifier: str) -> Any | None:
+    """Bounded breadth-first walk; return the first node whose ``AXIdentifier``
+    equals ``identifier`` exactly, or ``None`` if the budget runs out.
+
+    Same traversal discipline as :func:`_walk_for_heading` — BFS (``pop(0)``)
+    so a deep message-list subtree cannot bury a shallow chrome node, bounded
+    at ``_MAX_WALK_NODES``. Returns the element itself, not its labels.
+    """
+    queue: list[Any] = [elem]
+    visited = 0
+    while queue and visited < _MAX_WALK_NODES:
+        node = queue.pop(0)
+        visited += 1
+
+        id_err, node_id = AXUIElementCopyAttributeValue(node, kAXIdentifierAttribute, None)
+        if id_err == 0 and node_id == identifier:
+            return node
+
+        kids_err, kids = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, None)
+        if kids_err == 0 and kids:
+            queue.extend(kids)
+
+    return None
+
+
+def focus_composer() -> None:
+    """Move keyboard focus into the focused chat's message composer.
+
+    Return-selecting a sidebar search result opens the chat but leaves focus
+    in the search field, so every keystroke the group send fires afterwards
+    lands there instead of the composer — see :class:`ComposerNotFocused`.
+    The 1:1 deeplink path does not need this: ``whatsapp://send`` focuses the
+    composer itself.
+
+    Sets ``AXFocused`` on the ``ChatBar_ComposerTextView`` node, then re-reads
+    ``AXFocusedUIElement`` until it reports that same identifier. Raises
+    rather than returning a boolean: every caller must abort the send, and a
+    silently-ignored False would type the body into the search field.
+
+    Raises:
+        AccessibilityAPIUnavailable: pyobjc runtime imports failed (D-06).
+        ComposerNotFocused: WhatsApp is not running, the focused window or
+            the composer node could not be read, or focus did not land on
+            the composer within the settle budget.
+    """
+    if not _PYOBJC_AVAILABLE:
+        raise AccessibilityAPIUnavailable(
+            "pyobjc is unavailable; cannot focus the message composer. "
+            "Install with: pip install pyobjc-core pyobjc-framework-Cocoa "
+            "pyobjc-framework-ApplicationServices"
+        )
+
+    pid = _resolve_whatsapp_pid()
+    if pid is None:
+        raise ComposerNotFocused(
+            "WhatsApp.app is not running; cannot focus the message composer — "
+            "start WhatsApp Desktop and retry"
+        )
+
+    app = AXUIElementCreateApplication(pid)
+    err, window = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, None)
+    if err != 0 or window is None:
+        raise ComposerNotFocused(
+            f"AXFocusedWindow lookup failed (err={err}); cannot focus the message "
+            "composer — bring WhatsApp Desktop to foreground and retry"
+        )
+
+    composer = _find_by_identifier(window, _COMPOSER_IDENTIFIER)
+    if composer is None:
+        raise ComposerNotFocused(
+            f"no node with AXIdentifier={_COMPOSER_IDENTIFIER!r} under the focused "
+            "window; the chat may not be open, or this WhatsApp build renames the "
+            "composer"
+        )
+
+    AXUIElementSetAttributeValue(composer, kAXFocusedAttribute, True)
+
+    for attempt in range(_FOCUS_SETTLE_ATTEMPTS):
+        if attempt:
+            time.sleep(_FOCUS_SETTLE_INTERVAL_S)
+        focus_err, focused = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute, None)
+        if focus_err != 0 or focused is None:
+            continue
+        id_err, node_id = AXUIElementCopyAttributeValue(focused, kAXIdentifierAttribute, None)
+        if id_err == 0 and node_id == _COMPOSER_IDENTIFIER:
+            logger.debug("focus_composer: composer focused after %d attempt(s)", attempt + 1)
+            return
+
+    raise ComposerNotFocused(
+        f"set AXFocused on {_COMPOSER_IDENTIFIER!r} but AXFocusedUIElement never "
+        f"reported it within {_FOCUS_SETTLE_ATTEMPTS * _FOCUS_SETTLE_INTERVAL_S:.2f}s; "
+        "aborting rather than typing into whatever holds focus"
     )

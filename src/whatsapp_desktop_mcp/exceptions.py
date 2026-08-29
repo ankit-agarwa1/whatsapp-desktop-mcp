@@ -149,6 +149,24 @@ class ChatHeaderMismatch(WhatsAppMCPError):
     """
 
 
+class ComposerNotFocused(WhatsAppMCPError):
+    """Raised when the group search-and-click flow cannot put keyboard focus
+    into the chat's message composer.
+
+    Selecting a sidebar search result with Return opens the chat but leaves
+    focus in the sidebar search field (``TokenizedSearchBar_TextView``,
+    verified live on WhatsApp 26.31.23). Every keystroke that follows — the
+    body ``type_string``, or the image ``Cmd-V`` — then lands in the search
+    field instead of the composer and the send silently does nothing.
+
+    The sender moves focus explicitly via ``AXFocused`` on the composer
+    (``ChatBar_ComposerTextView``) and re-reads ``AXFocusedUIElement`` to
+    confirm. This exception means that confirmation failed, so the send is
+    aborted BEFORE any keystroke fires rather than typed into the wrong
+    field.
+    """
+
+
 class AccessibilityAPIUnavailable(WhatsAppMCPError):
     """Raised when ``sender.ax_assert`` is invoked on a system where the pyobjc
     runtime imports failed (D-06 ImportError fallback).

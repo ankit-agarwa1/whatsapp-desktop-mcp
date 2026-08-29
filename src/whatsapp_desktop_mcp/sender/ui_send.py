@@ -100,6 +100,7 @@ from whatsapp_desktop_mcp.permissions.osascript import run_osascript
 from whatsapp_desktop_mcp.sender.ax_assert import (
     _assert_first_search_result_matches,
     assert_focused_chat_matches,
+    focus_composer,
 )
 from whatsapp_desktop_mcp.sender.deeplink import send_deeplink
 from whatsapp_desktop_mcp.sender.osascript_send import press_paste, press_return, type_string
@@ -305,6 +306,14 @@ async def _open_group_chat_via_search(chat_name: str) -> None:
     # type_string (Plan 02-05 asserts call order at the
     # orchestration layer).
     assert_focused_chat_matches(chat_name)
+
+    # Step 6b — the Return in step 5 opened the chat but left focus in
+    # the sidebar search field, so the body type_string / Cmd-V that
+    # follows would land there and the send would silently do nothing
+    # (verified live on 26.31.23: AXFocusedUIElement was still
+    # TokenizedSearchBar_TextView with the search term in it). Raises
+    # rather than returning, so a failure aborts before any keystroke.
+    focus_composer()
 
 
 async def send_group_via_search(chat_name: str, body: str) -> None:

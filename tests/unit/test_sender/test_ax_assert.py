@@ -22,10 +22,17 @@ regression.
 from __future__ import annotations
 
 import pytest
+from ApplicationServices import (
+    kAXChildrenAttribute,
+    kAXFocusedUIElementAttribute,
+    kAXFocusedWindowAttribute,
+    kAXIdentifierAttribute,
+)
 
 from whatsapp_desktop_mcp.exceptions import (
     AccessibilityAPIUnavailable,
     ChatHeaderMismatch,
+    ComposerNotFocused,
 )
 from whatsapp_desktop_mcp.sender import ax_assert
 
@@ -439,3 +446,148 @@ def test_persistently_unreadable_header_exhausts_retries_and_raises(
         ax_assert.assert_focused_chat_matches("Nitin Stable Money")
 
     assert calls["walk"] == ax_assert._HEADER_SETTLE_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# focus_composer — verified live on WhatsApp 26.31.23
+# ---------------------------------------------------------------------------
+#
+# Return-selecting a sidebar search result opens the chat but leaves
+# AXFocusedUIElement on TokenizedSearchBar_TextView. The group image send
+# fired Cmd-V into the search field: the chat was open and the clipboard held
+# the image, but nothing was sent and no ZWAMESSAGE row appeared.
+
+
+def _stub_focus(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    composer_found: bool,
+    focused_ids: list[str | None],
+) -> dict[str, int]:
+    """Drive focus_composer with a scripted AXFocusedUIElement identifier sequence.
+
+    ``focused_ids`` is read one entry per settle attempt; the last entry
+    repeats once exhausted.
+    """
+    calls = {"set": 0, "sleep": 0, "focus_read": 0}
+    composer = object()
+
+    monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", True)
+    monkeypatch.setattr(ax_assert, "_resolve_whatsapp_pid", lambda: 948)
+    monkeypatch.setattr(ax_assert, "AXUIElementCreateApplication", lambda _pid: object())
+    monkeypatch.setattr(
+        ax_assert,
+        "_find_by_identifier",
+        lambda _elem, _ident: composer if composer_found else None,
+    )
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["sleep"] += 1
+
+    monkeypatch.setattr("whatsapp_desktop_mcp.sender.ax_assert.time.sleep", fake_sleep)
+
+    def fake_set(_elem: object, _attr: object, _value: object) -> int:
+        calls["set"] += 1
+        return 0
+
+    monkeypatch.setattr(ax_assert, "AXUIElementSetAttributeValue", fake_set)
+
+    focused_marker = object()
+
+    def fake_copy(_elem: object, attr: object, _none: object) -> tuple[int, object]:
+        if attr == kAXFocusedWindowAttribute:
+            return (0, object())
+        if attr == kAXFocusedUIElementAttribute:
+            calls["focus_read"] += 1
+            return (0, focused_marker)
+        if attr == kAXIdentifierAttribute:
+            idx = min(calls["focus_read"] - 1, len(focused_ids) - 1)
+            value = focused_ids[idx]
+            return (0, value) if value is not None else (-1, None)
+        return (0, object())
+
+    monkeypatch.setattr(ax_assert, "AXUIElementCopyAttributeValue", fake_copy)
+    return calls
+
+
+def test_focus_composer_returns_once_focus_lands_on_the_composer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Focus is applied asynchronously — the search field is read first, then the composer."""
+    calls = _stub_focus(
+        monkeypatch,
+        composer_found=True,
+        focused_ids=["TokenizedSearchBar_TextView", ax_assert._COMPOSER_IDENTIFIER],
+    )
+
+    ax_assert.focus_composer()
+
+    assert calls["set"] == 1
+    assert calls["focus_read"] == 2  # retried past the stale search-field read
+
+
+def test_focus_composer_raises_when_focus_never_leaves_the_search_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live failure: focus stuck on the search bar must ABORT, never type."""
+    calls = _stub_focus(
+        monkeypatch,
+        composer_found=True,
+        focused_ids=["TokenizedSearchBar_TextView"],
+    )
+
+    with pytest.raises(ComposerNotFocused, match="AXFocusedUIElement never"):
+        ax_assert.focus_composer()
+
+    assert calls["focus_read"] == ax_assert._FOCUS_SETTLE_ATTEMPTS
+
+
+def test_focus_composer_raises_when_the_composer_node_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ChatBar_ComposerTextView under the focused window → abort, do not guess."""
+    _stub_focus(monkeypatch, composer_found=False, focused_ids=[])
+
+    with pytest.raises(ComposerNotFocused, match="ChatBar_ComposerTextView"):
+        ax_assert.focus_composer()
+
+
+def test_focus_composer_raises_when_pyobjc_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-06 fallback: a broken pyobjc install surfaces as AccessibilityAPIUnavailable."""
+    monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", False)
+
+    with pytest.raises(AccessibilityAPIUnavailable):
+        ax_assert.focus_composer()
+
+
+def test_find_by_identifier_is_breadth_first_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deep decoy subtree must not bury the shallow composer, and the walk is capped."""
+
+    class Node:
+        def __init__(self, ident: str | None, kids: list[Node] | None = None) -> None:
+            self.ident = ident
+            self.kids = kids or []
+
+    # A long chain (the message list) enqueued BEFORE the shallow composer:
+    # DFS would exhaust the budget inside it; BFS reaches the composer at depth 1.
+    chain: Node = Node("deep-leaf")
+    for _ in range(ax_assert._MAX_WALK_NODES * 2):
+        chain = Node("deep", [chain])
+    composer = Node(ax_assert._COMPOSER_IDENTIFIER)
+    root = Node("root", [chain, composer])
+
+    def fake_copy(elem: Node, attr: object, _none: object) -> tuple[int, object]:
+        if attr == kAXIdentifierAttribute:
+            return (0, elem.ident)
+        if attr == kAXChildrenAttribute:
+            return (0, elem.kids)
+        return (-1, None)
+
+    monkeypatch.setattr(ax_assert, "AXUIElementCopyAttributeValue", fake_copy)
+
+    assert ax_assert._find_by_identifier(root, ax_assert._COMPOSER_IDENTIFIER) is composer
+    assert ax_assert._find_by_identifier(root, "not-present") is None

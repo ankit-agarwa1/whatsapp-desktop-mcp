@@ -50,6 +50,9 @@ def _install_call_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     def fake_ax_first_search(name: str) -> None:
         call_log.append("_assert_first_search_result_matches")
 
+    def fake_focus_composer() -> None:
+        call_log.append("focus_composer")
+
     async def fake_press_return(timeout: float = 3.0) -> None:
         call_log.append("press_return")
 
@@ -67,6 +70,7 @@ def _install_call_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(ui_send, "send_deeplink", fake_send_deeplink)
     monkeypatch.setattr(ui_send, "assert_focused_chat_matches", fake_ax_focused)
     monkeypatch.setattr(ui_send, "_assert_first_search_result_matches", fake_ax_first_search)
+    monkeypatch.setattr(ui_send, "focus_composer", fake_focus_composer)
     monkeypatch.setattr(ui_send, "press_return", fake_press_return)
     monkeypatch.setattr(ui_send, "type_string", fake_type_string)
     monkeypatch.setattr(ui_send, "run_osascript", fake_run_osascript)
@@ -221,11 +225,14 @@ async def test_send_text_kind_group_calls_search_and_click_with_ax_before_keystr
     4. _assert_first_search_result_matches (preflight on topmost result)
     5. press_return (open chat)
     6. assert_focused_chat_matches (preflight on now-focused chat)
+    6b. focus_composer (move focus off the sidebar search field)
     7. type_string (body)
     8. press_return (send)
 
     Both AX preflights (steps 4 + 6) MUST appear BEFORE their respective
-    press_return calls (steps 5 + 8).
+    press_return calls (steps 5 + 8), and focus_composer MUST appear
+    before the body type_string — otherwise the body is typed into the
+    search field and nothing is sent.
     """
     call_log = _install_call_log(monkeypatch)
 
@@ -247,6 +254,13 @@ async def test_send_text_kind_group_calls_search_and_click_with_ax_before_keystr
     # The second press_return appears after the focused-chat preflight.
     second_press_idx = call_log.index("press_return", idx_first_press + 1)
     assert idx_focused_ax < second_press_idx
+
+    # Focus is moved off the sidebar search field after the chat opens and
+    # BEFORE the body is typed. Without this the body lands in the search
+    # field and no message is sent — the live failure this ordering pins.
+    idx_focus = call_log.index("focus_composer")
+    idx_body_type = call_log.index("type_string", idx_first_press)
+    assert idx_focused_ax < idx_focus < idx_body_type
 
 
 @pytest.mark.asyncio
@@ -389,3 +403,36 @@ async def test_send_image_rejects_unsupported_chat_kind(
 
     with pytest.raises(NotImplementedError, match="does not support chat kind"):
         await ui_send.send_image(1, str(tmp_path / "x.png"), "Somebody", None, "broadcast")
+
+
+@pytest.mark.asyncio
+async def test_send_image_to_group_focuses_composer_before_pasting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Group image send: Cmd-V must not fire while the sidebar search holds focus.
+
+    Verified-live regression. The chat opened and the clipboard held the
+    image, but focus was still TokenizedSearchBar_TextView, so Cmd-V went to
+    the search field and no message was sent (outcome ``sent_unverified``,
+    no ZWAMESSAGE row).
+    """
+    order = _install_call_log(monkeypatch)
+
+    def fake_clipboard(image_path: str) -> Path:
+        order.append("clipboard")
+        return Path(image_path)
+
+    monkeypatch.setattr(ui_send, "put_image_on_clipboard", fake_clipboard)
+
+    async def fake_paste() -> None:
+        order.append("press_paste")
+
+    monkeypatch.setattr(ui_send, "press_paste", fake_paste)
+    monkeypatch.setattr(ui_send, "_POST_PASTE_SETTLE_S", 0)
+
+    is_experimental, _started = await ui_send.send_image(
+        516, str(tmp_path / "x.png"), "reminder", None, "group"
+    )
+
+    assert is_experimental is True
+    assert order.index("focus_composer") < order.index("press_paste")
