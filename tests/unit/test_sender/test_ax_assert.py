@@ -469,7 +469,7 @@ def _stub_focus(
     ``focused_ids`` is read one entry per settle attempt; the last entry
     repeats once exhausted.
     """
-    calls = {"set": 0, "sleep": 0, "focus_read": 0}
+    calls = {"press": 0, "sleep": 0, "focus_read": 0}
     composer = object()
 
     monkeypatch.setattr(ax_assert, "_PYOBJC_AVAILABLE", True)
@@ -486,11 +486,11 @@ def _stub_focus(
 
     monkeypatch.setattr("whatsapp_desktop_mcp.sender.ax_assert.time.sleep", fake_sleep)
 
-    def fake_set(_elem: object, _attr: object, _value: object) -> int:
-        calls["set"] += 1
+    def fake_press(_elem: object, _action: str) -> int:
+        calls["press"] += 1
         return 0
 
-    monkeypatch.setattr(ax_assert, "AXUIElementSetAttributeValue", fake_set)
+    monkeypatch.setattr(ax_assert, "AXUIElementPerformAction", fake_press)
 
     focused_marker = object()
 
@@ -522,7 +522,7 @@ def test_focus_composer_returns_once_focus_lands_on_the_composer(
 
     ax_assert.focus_composer()
 
-    assert calls["set"] == 1
+    assert calls["press"] == 1
     assert calls["focus_read"] == 2  # retried past the stale search-field read
 
 
